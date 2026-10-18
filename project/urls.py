@@ -14,14 +14,14 @@ urlpatterns = [
         name="project-dashboard-view",
     ),
     path(
-        "dashboard/api/kpi/",
-        proj_dashboard.project_kpi_data,
-        name="project-dashboard-kpi",
+        "dashboard/api/task-kpi/",
+        proj_dashboard.project_task_kpi_data,
+        name="project-dashboard-task-kpi",
     ),
     path(
-        "dashboard/api/status/",
-        proj_dashboard.project_status_distribution,
-        name="project-dashboard-status",
+        "dashboard/api/pipeline/",
+        proj_dashboard.project_status_pipeline,
+        name="project-dashboard-pipeline",
     ),
     path(
         "dashboard/api/tasks/",
@@ -29,19 +29,24 @@ urlpatterns = [
         name="project-dashboard-tasks",
     ),
     path(
-        "dashboard/api/trend/",
-        proj_dashboard.project_monthly_trend,
-        name="project-dashboard-trend",
-    ),
-    path(
-        "dashboard/api/deadlines/",
-        proj_dashboard.project_upcoming_deadlines,
-        name="project-dashboard-deadlines",
+        "dashboard/api/timesheet/",
+        proj_dashboard.project_timesheet_trend,
+        name="project-dashboard-timesheet",
     ),
     path(
         "dashboard/api/top/",
         proj_dashboard.project_top_active,
         name="project-dashboard-top",
+    ),
+    path(
+        "dashboard/api/contributors/",
+        proj_dashboard.project_top_contributors,
+        name="project-dashboard-contributors",
+    ),
+    path(
+        "dashboard/api/task-deadlines/",
+        proj_dashboard.project_task_deadlines,
+        name="project-dashboard-task-deadlines",
     ),
     path(
         "projects-due-in-this-month/",
@@ -98,6 +103,11 @@ urlpatterns = [
     ),
     path("project-filter/", views.project_filter, name="project-filter"),
     path("project-import/", views.project_import, name="project-import"),
+    path(
+        "project-import-template/",
+        views.project_import_template,
+        name="project-import-template",
+    ),
     path("project-bulk-export/", views.project_bulk_export, name="project-bulk-export"),
     path(
         "project-bulk-archive/", views.project_bulk_archive, name="project-bulk-archive"
@@ -249,9 +259,34 @@ urlpatterns = [
         name="get-tasks-of-project",
     ),
     path(
+        "time-sheet-tab-view/",
+        timesheet.TimeSheetTabView.as_view(),
+        name="time-sheet-tab-view",
+    ),
+    path(
+        "time-sheet-tab-shell/",
+        timesheet.TimeSheetTabShell.as_view(),
+        name="time-sheet-tab-shell",
+    ),
+    path(
+        "my-time-sheet-tab-shell/",
+        timesheet.MyTimeSheetTabShell.as_view(),
+        name="my-time-sheet-tab-shell",
+    ),
+    path(
         "time-sheet-nav/", timesheet.TimeSheetNavView.as_view(), name="time-sheet-nav"
     ),
+    path(
+        "my-time-sheet-nav/",
+        timesheet.MyTimeSheetNavView.as_view(),
+        name="my-time-sheet-nav",
+    ),
     path("time-sheet-list/", timesheet.TimeSheetList.as_view(), name="time-sheet-list"),
+    path(
+        "my-time-sheet-list/",
+        timesheet.MyTimeSheetList.as_view(),
+        name="my-time-sheet-list",
+    ),
     path(
         "time-sheet-card/",
         timesheet.TimeSheetCardView.as_view(),

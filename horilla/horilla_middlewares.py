@@ -15,6 +15,7 @@ from django.shortcuts import render
 from django.utils.datastructures import MultiValueDictKeyError
 
 from horilla.config import logger
+from horilla.http.response import HorillaRedirect
 
 _request_var = ContextVar("request", default=None)
 current_company_id = ContextVar("current_company_id", default=None)
@@ -52,8 +53,17 @@ class ThreadLocalMiddleware:
 
     def __call__(self, request):
         _thread_locals.request = request
-        response = self.get_response(request)
-        return response
+        try:
+            return self.get_response(request)
+        finally:
+            # Clear on the way out. Threads are reused -- by a worker for the
+            # next request, and by the test runner for the next test -- so a
+            # request left here outlives the one it belongs to. Anything that
+            # reads it later (HorillaModel.save() stamps created_by/modified_by
+            # from request.user) then attributes work to a stale user. In tests
+            # that surfaces as an IntegrityError at teardown: modified_by_id
+            # points at a user whose transaction has already rolled back.
+            _thread_locals.request = None
 
 
 class DefaultLanguageMiddleware:
@@ -116,16 +126,14 @@ class MissingParameterMiddleware:
 
             logger.error(message)
 
-            if not settings.DEBUG:
-                messages.error(request, message)
-                return render(request, "went_wrong.html", status=400)
+            return HorillaRedirect(request, message=message)
 
         elif isinstance(exception, ObjectDoesNotExist):
             logger.error(f"{exception.__class__.__name__}: {exception}")
 
-            if not settings.DEBUG:
-                messages.error(request, "The requested item could not be found.")
-                return render(request, "went_wrong.html", status=404)
+            return HorillaRedirect(
+                request, message="The requested item could not be found."
+            )
 
         return None
 
@@ -136,3 +144,35 @@ def set_selected_company(company_id):
 
 def get_selected_company():
     return current_company_id.get()
+
+
+class BulkDeleteSummaryMiddleware:
+    """
+    Drops the toast messages of a bulk delete the browser is already reporting.
+
+    static/index/index.js wraps every bulk-delete call: progress dialog, then a
+    Total / Deleted / Failed result dialog worked out from which ids still
+    exist. It marks those requests with X-Hlv-Bulk-Delete. The views still queue
+    a toast per record ("You cannot delete X"), which would show up on top of
+    that dialog (or, after a page reload, long after it), so they're discarded
+    here instead of being edited out of every view. Bulk approve / reject views
+    do the same by returning X-Hlv-Bulk-Result
+    (horilla.http.response.with_bulk_result).
+
+    Must sit after MessageMiddleware in MIDDLEWARE: responses unwind in reverse,
+    so this runs before the messages are written back to the session.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        if request.headers.get("X-Hlv-Bulk-Delete") or response.has_header(
+            "X-Hlv-Bulk-Result"
+        ):
+            storage = getattr(request, "_messages", None)
+            if storage is not None:
+                # Iterating marks every queued message as used.
+                list(storage)
+        return response

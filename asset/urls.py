@@ -2,7 +2,6 @@
 URL configuration for asset-related views.
 """
 
-from django import views
 from django.urls import path
 
 from asset import dashboard as asset_dashboard
@@ -55,6 +54,11 @@ urlpatterns = [
     #     views.asset_creation,
     #     name="asset-creation",
     # ),
+    path(
+        "asset-creation/",
+        asset_category.AssetFormView.as_view(),
+        name="asset-creation-new",
+    ),
     path(
         "asset-creation/<int:asset_category_id>/",
         asset_category.AssetFormView.as_view(),
@@ -137,6 +141,11 @@ urlpatterns = [
         "asset-category-nav/",
         asset_category.AssetCategoryNav.as_view(),
         name="asset-category-nav",
+    ),
+    path(
+        "asset-category-list/",
+        asset_category.AssetCategoryListView.as_view(),
+        name="asset-category-list",
     ),
     # path(
     #     "asset-category-creation",
@@ -393,9 +402,34 @@ urlpatterns = [
         name="list-asset-allocation",
     ),
     path(
-        "nav-asset-request-allocation/",
-        request_and_allocation.RequestAndAllocationNav.as_view(),
-        name="nav-asset-request-allocation",
+        "req-alloc-asset-nav/",
+        request_and_allocation.AssetNav.as_view(),
+        name="req-alloc-asset-nav",
+    ),
+    path(
+        "req-alloc-asset-request-nav/",
+        request_and_allocation.AssetRequestNav.as_view(),
+        name="req-alloc-asset-request-nav",
+    ),
+    path(
+        "req-alloc-asset-allocation-nav/",
+        request_and_allocation.AssetAllocationNav.as_view(),
+        name="req-alloc-asset-allocation-nav",
+    ),
+    path(
+        "req-alloc-asset-tab-shell/",
+        request_and_allocation.AssetTabShell.as_view(),
+        name="req-alloc-asset-tab-shell",
+    ),
+    path(
+        "req-alloc-asset-request-tab-shell/",
+        request_and_allocation.AssetRequestTabShell.as_view(),
+        name="req-alloc-asset-request-tab-shell",
+    ),
+    path(
+        "req-alloc-asset-allocation-tab-shell/",
+        request_and_allocation.AssetAllocationTabShell.as_view(),
+        name="req-alloc-asset-allocation-tab-shell",
     ),
     path(
         "asset-detail-view/<int:pk>/",
@@ -413,6 +447,16 @@ urlpatterns = [
         name="asset-request-tab-list-view",
     ),
     path(
+        "asset-request-tab-shell/<int:pk>/",
+        asset_tab.AssetRequestIndividualTabShell.as_view(),
+        name="asset-request-tab-shell",
+    ),
+    path(
+        "asset-request-tab-nav/<int:pk>/",
+        asset_tab.AssetRequestIndividualNav.as_view(),
+        name="asset-request-tab-nav",
+    ),
+    path(
         "assets-tab-list-view/<int:pk>/",
         asset_tab.AssetTabListView.as_view(),
         name="assets-tab-list-view",
@@ -426,6 +470,41 @@ urlpatterns = [
         "asset-request-approve-form/<int:req_id>/",
         request_and_allocation.AssetApproveFormView.as_view(),
         name="asset-request-approve-form",
+    ),
+    path(
+        "asset-service-request-creation/",
+        request_and_allocation.AssetServiceRequestCreateForm.as_view(),
+        name="asset-service-request-creation",
+    ),
+    path(
+        "list-asset-service-request/",
+        request_and_allocation.AssetServiceRequestList.as_view(),
+        name="list-asset-service-request",
+    ),
+    path(
+        "req-alloc-service-request-nav/",
+        request_and_allocation.AssetServiceRequestNav.as_view(),
+        name="req-alloc-service-request-nav",
+    ),
+    path(
+        "req-alloc-service-request-tab-shell/",
+        request_and_allocation.AssetServiceRequestTabShell.as_view(),
+        name="req-alloc-service-request-tab-shell",
+    ),
+    path(
+        "asset-service-request-detail-view/<int:pk>/",
+        request_and_allocation.AssetServiceRequestDetailView.as_view(),
+        name="asset-service-request-detail-view",
+    ),
+    path(
+        "asset-service-request-history/<int:pk>/",
+        request_and_allocation.AssetServiceRequestHistoryView.as_view(),
+        name="asset-service-request-history",
+    ),
+    path(
+        "asset-service-request-add-note/<int:pk>/",
+        views.asset_service_request_add_note,
+        name="asset-service-request-add-note",
     ),
     path("asset-tab/<int:pk>/", views.asset_tab, name="asset-tab"),
     path(
@@ -518,5 +597,15 @@ urlpatterns = [
         "asset-reassign/<int:pk>/",
         request_and_allocation.AssetReassignFormView.as_view(),
         name="asset-reassign",
+    ),
+    path(
+        "asset-rule-view/",
+        views.asset_rule_settings_view,
+        name="asset-rule-view",
+    ),
+    path(
+        "enable-disable-asset-fine/",
+        views.enable_disable_asset_fine,
+        name="enable-disable-asset-fine",
     ),
 ]

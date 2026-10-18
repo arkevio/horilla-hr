@@ -4,11 +4,13 @@ onboarding/cbv/pipeline.py
 
 import json
 import re
+from typing import Any
 
 from django.contrib import messages
 from django.core.exceptions import ObjectDoesNotExist
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.http import HttpResponse, JsonResponse
+from django.shortcuts import get_object_or_404
 from django.urls import reverse, reverse_lazy
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
@@ -31,6 +33,7 @@ from horilla_views.generic.cbv.views import (
     HorillaNavView,
     HorillaTabView,
 )
+from horilla_views.models import ActiveView
 from onboarding import filters as onboarding_filters
 from onboarding import forms
 from onboarding import models as onboarding_models
@@ -63,13 +66,21 @@ class PipelineNav(HorillaNavView):
     """
 
     search_url = reverse_lazy("cbv-pipeline-tab-onboarding")
-    nav_title = _("Pipeline")
+    nav_title = _("Onboarding Tasks")
     search_swap_target = "#pipelineContainer"
     apply_first_filter = False
     filter_body_template = "cbv/pipeline/onboarding/filters.html"
     filter_instance = onboarding_filters.RecruitmentFilter()
     # filter_instance_context_name = "filter"
     filter_form_context_name = "form"
+    # Modern slide-over filter panel (generic/horilla_nav.html's own
+    # {% if modern_filter %} branch) -- same treatment as every other
+    # panel this session. onboarding_filters.RecruitmentFilter inherits
+    # recruitment.filters.RecruitmentFilter.ajax_fields (Managers,
+    # Company); OnboardingStageFilter/OnboardingCandidateFilter each
+    # carry their own ajax_fields for the Stage Manager/Tasks pickers
+    # this combined panel renders.
+    modern_filter = True
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -105,6 +116,71 @@ class PipelineNav(HorillaNavView):
         return context
 
 
+def recruitment_pipeline_actions_onboarding(request, rec):
+    """
+    Recruitment-level actions (Add Stage/Manage Stage Order/Edit/Delete)
+    for the given recruitment's onboarding pipeline - shared between
+    RecruitmentTabView (which used to put these in the tab bar's kebab)
+    and RecruitmentPipelineContentShell (which renders them inline in the
+    pipeline content's own header instead).
+    """
+    actions = []
+    if request.user.has_perm("onboarding.add_onboardingstage") or recruitment_manages(
+        request, rec
+    ):
+        actions.append(
+            {
+                "action": _("Add Stage"),
+                "attrs": f"""
+                    data-toggle="oh-modal-toggle"
+                    data-target="#genericModal"
+                    hx-get="{reverse("stage-creation", kwargs={"obj_id": rec.pk})}"
+                    hx-target="#genericModalBody"
+                    style="cursor: pointer;"
+                """,
+            }
+        )
+        actions.append(
+            {
+                "action": _("Manage Stage Order"),
+                "attrs": f"""
+                    data-toggle="oh-modal-toggle"
+                    data-target="#genericModal"
+                    hx-get="{reverse("onboarding-stage-sequence-update", kwargs={"pk": rec.pk})}"
+                    hx-target="#genericModalBody"
+                    style="cursor: pointer;"
+                """,
+            }
+        )
+    if request.user.has_perm("recruitment.change_recruitment"):
+        actions.append(
+            {
+                "action": _("Edit"),
+                "attrs": f"""
+                    data-toggle="oh-modal-toggle"
+                    data-target="#genericModal"
+                    hx-get="{reverse("recruitment-update-pipeline", kwargs={"pk": rec.pk})}"
+                    hx-target="#genericModalBody"
+                    style="cursor: pointer;"
+                """,
+            }
+        )
+    if request.user.has_perm("recruitment.delete_recruitment"):
+        actions.append(
+            {
+                "action": _("Delete"),
+                "attrs": f"""
+                    data-toggle="oh-modal-toggle"
+                    data-target="#deleteConfirmation"
+                    hx-get="{reverse('generic-delete')}?model=recruitment.Recruitment&pk={rec.pk}&reload_target=%23applyFilter"
+                    hx-target="#deleteConfirmationBody"
+                    style="cursor: pointer;"
+                """,
+            }
+        )
+    return actions
+
+
 @method_decorator(login_required, name="dispatch")
 @method_decorator(
     all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
@@ -120,76 +196,201 @@ class RecruitmentTabView(HorillaTabView):
             is_active=True
         )
         view_type = self.request.GET.get("view", "list")
+        # Carry over any other query params (e.g. ?task_status=stuck from the
+        # dashboard's Stuck Tasks tile) down into each tab's shell, which in
+        # turn forwards them to the actual board content request -- "view"
+        # is excluded since it's already handled by the view_type/url logic
+        # below, not meant to be a board-content filter itself.
+        extra_params = self.request.GET.copy()
+        extra_params.pop("view", None)
+        extra_qs = extra_params.urlencode()
         self.tabs = []
+        # Candidates on each job's board (one stage row per candidate), not
+        # how many stages it has.
+        candidate_stage_qs = onboarding_models.CandidateStage.objects.filter(
+            onboarding_stage_id__recruitment_id__in=recruitments.values_list(
+                "pk", flat=True
+            ),
+            onboarding_stage_id__is_active=True,
+        )
+        # The card/kanban board sets records_count_in_tab = False precisely so
+        # this tab badge counts candidates, not columns -- but unlike the list
+        # board's own stage badges (CandidatePipeline.get_queryset), nothing
+        # ever patches this one from the client side, so a task_status filter
+        # left unapplied here stuck permanently at the unfiltered total: the
+        # dashboard's Stuck Tasks tile landed on a tab badge that kept showing
+        # every candidate, never the stuck ones, no matter what the board
+        # underneath it correctly rendered.
+        task_status = self.request.GET.get("task_status")
+        if task_status:
+            candidate_stage_qs = candidate_stage_qs.filter(
+                candidate_id__candidate_task__status=task_status
+            )
+        candidate_counts = dict(
+            candidate_stage_qs.values("onboarding_stage_id__recruitment_id")
+            .annotate(total=Count("candidate_id", distinct=True))
+            .values_list("onboarding_stage_id__recruitment_id", "total")
+        )
         for rec in recruitments:
             tab = {}
             tab["title"] = rec
-            url = reverse("candidate-card-cbv-onboarding", kwargs={"pk": rec.pk})
-            if view_type == "list":
-                url = reverse(
-                    "get-stages-onboarding", kwargs={"recruitment_id": rec.pk}
-                )
+            url = reverse("onboarding-pipeline-shell", kwargs={"rec_id": rec.pk})
+            query_parts = []
+            if view_type != "list":
+                query_parts.append(f"view={view_type}")
+            if extra_qs:
+                query_parts.append(extra_qs)
+            if query_parts:
+                url += "?" + "&".join(query_parts)
             tab["url"] = url
 
-            tab["badge_label"] = _("Stages")
-            tab["badge"] = rec.onboarding_stage.filter(is_active=True).count()
-            tab["actions"] = []
-            if self.request.user.has_perm(
-                "onboarding.add_onboardingstage"
-            ) or recruitment_manages(self.request, rec):
-                tab["actions"].append(
-                    {
-                        "action": _("Add Stage"),
-                        "attrs": f"""
-                            data-toggle="oh-modal-toggle"
-                            data-target="#genericModal"
-                            hx-get="{reverse("stage-creation", kwargs={"obj_id": rec.pk})}"
-                            hx-target="#genericModalBody"
-                            style="cursor: pointer;"
-                        """,
-                    }
-                )
-                tab["actions"].append(
-                    {
-                        "action": _("Manage Stage Order"),
-                        "attrs": f"""
-                            data-toggle="oh-modal-toggle"
-                            data-target="#genericModal"
-                            hx-get="{reverse("onboarding-stage-sequence-update", kwargs={"pk": rec.pk})}"
-                            hx-target="#genericModalBody"
-                            style="cursor: pointer;"
-                        """,
-                    }
-                )
-            if self.request.user.has_perm("recruitment.change_recruitment"):
-                tab["actions"].append(
-                    {
-                        "action": _("Edit"),
-                        "attrs": f"""
-                                    data-toggle="oh-modal-toggle"
-                                    data-target="#genericModal"
-                                    hx-get="{reverse("recruitment-update-pipeline", kwargs={"pk": rec.pk})}"
-                                    hx-target="#genericModalBody"
-                                    style="cursor: pointer;"
-                                    onclick="
-                                    "
-                                    """,
-                    }
-                )
-            if self.request.user.has_perm("recruitment.delete_recruitment"):
-                tab["actions"].append(
-                    {
-                        "action": _("Delete"),
-                        "attrs": f"""
-                                        data-toggle="oh-modal-toggle"
-                                        data-target="#deleteConfirmation"
-                                        hx-get="{reverse('generic-delete')}?model=recruitment.Recruitment&pk={rec.pk}&reload_target=%23applyFilter"
-                                        hx-target="#deleteConfirmationBody"
-                                        style="cursor: pointer;"
-                                        """,
-                    }
-                )
+            tab["badge_label"] = _("Candidates")
+            tab["badge"] = candidate_counts.get(rec.pk, 0)
             self.tabs.append(tab)
+
+
+@method_decorator(login_required, name="dispatch")
+@method_decorator(
+    all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
+)
+class RecruitmentCandidateNav(HorillaNavView):
+    """
+    Per-job-tab Search+Filter for the Onboarding pipeline page, mirroring
+    recruitment.cbv.pipeline.RecruitmentCandidateNav: one instance per job
+    tab, searching/filtering that job's own onboarding candidates
+    (PipelineCandidateFilter) rather than the page-level RecruitmentFilter
+    (which decides which RECRUITMENTS show up as tabs at all).
+    """
+
+    filter_form_context_name = "form"
+    filter_body_template = "cbv/pipeline/onboarding/candidate_filter.html"
+    apply_first_filter = True
+    template_name = "generic/inline_nav.html"
+    nav_title = _("Pipeline")
+    # Modern slide-over filter panel (generic/inline_nav.html's own
+    # {% if modern_filter %} branch) -- same treatment as the page-level
+    # PipelineNav/filters.html and the sibling recruitment/offboarding
+    # per-tab panels. PipelineCandidateFilter is now a HorillaFilterSet
+    # subclass so it gets the Advanced "+ Add filter" builder too.
+    modern_filter = True
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        rec_id = self.request.resolver_match.kwargs.get("rec_id")
+        view_type = self.request.GET.get("view")
+        if view_type == "card":
+            self.search_url = reverse(
+                "candidate-card-cbv-onboarding", kwargs={"pk": rec_id}
+            )
+        else:
+            self.search_url = reverse(
+                "get-stages-onboarding", kwargs={"recruitment_id": rec_id}
+            )
+        self.search_swap_target = f"#pipelineTabContent{rec_id}"
+        self.filter_instance = onboarding_filters.PipelineCandidateFilter()
+
+        self.view_types = [
+            {
+                "type": "list",
+                "icon": "list-outline",
+                "url": reverse(
+                    "get-stages-onboarding", kwargs={"recruitment_id": rec_id}
+                ),
+                "attrs": """
+                    title ='List'
+                """,
+            },
+            {
+                "type": "card",
+                "icon": "grid-outline",
+                "url": reverse("candidate-card-cbv-onboarding", kwargs={"pk": rec_id})
+                + "?view=card",
+                "attrs": """
+                    title ='Card'
+                """,
+            },
+        ]
+
+        rec = recruitment_models.Recruitment.objects.filter(pk=rec_id).first()
+        if rec:
+            self.actions = recruitment_pipeline_actions_onboarding(self.request, rec)
+
+
+@method_decorator(login_required, name="dispatch")
+@method_decorator(
+    all_manager_can_enter(perm="recruitment.view_recruitment"), name="dispatch"
+)
+class RecruitmentPipelineContentShell(TemplateView):
+    """
+    Shell rendered for a single recruitment's onboarding pipeline tab -
+    wraps this tab's own Nav (RecruitmentCandidateNav, which carries the
+    Search+Filter and job-level Actions) and an htmx-loaded embed of the
+    existing list/kanban content.
+    """
+
+    template_name = "cbv/pipeline/onboarding/recruitment_pipeline_shell.html"
+
+    def saved_view_type(self, rec_id):
+        """
+        The list/card choice this user last made, for this job's tab.
+        """
+        user = self.request.user
+        if not (user and user.is_authenticated):
+            return None
+        active_view = (
+            ActiveView.objects.filter(created_by=user)
+            .filter(
+                Q(
+                    path=reverse(
+                        "onboarding-pipeline-tab-nav", kwargs={"rec_id": rec_id}
+                    )
+                )
+            )
+            .order_by("-path")
+            .first()
+        )
+        return active_view.type if active_view else None
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        rec = get_object_or_404(
+            recruitment_models.Recruitment, pk=self.kwargs.get("rec_id")
+        )
+        # Falls back to "list" (not just None) when neither this request nor
+        # a saved ActiveView row picked a view - content_url below already
+        # defaults to the list endpoint in that case, so the Nav's view-type
+        # toggle must resolve to the same "list" here too. Passing a falsy
+        # view_type through left nav_url without a `?view=`, so on a user's
+        # very first visit (no saved choice yet) HorillaNavView never marked
+        # either toggle button active even though list content was already
+        # on screen - and inline_nav.html's onload script then read "no
+        # button active" as "no filter has run yet" and fired an extra,
+        # redundant full-board resubmit right behind the first load.
+        view_type = (
+            self.request.GET.get("view") or self.saved_view_type(rec.pk) or "list"
+        )
+        content_url = reverse(
+            "get-stages-onboarding", kwargs={"recruitment_id": rec.pk}
+        )
+        if view_type == "card":
+            content_url = reverse(
+                "candidate-card-cbv-onboarding", kwargs={"pk": rec.pk}
+            )
+        # Forward any extra query params (e.g. ?task_status=stuck) through to
+        # the actual board content request -- "view" is excluded since it
+        # only picks which endpoint above, not a board-content filter itself.
+        extra_params = self.request.GET.copy()
+        extra_params.pop("view", None)
+        extra_qs = extra_params.urlencode()
+        if extra_qs:
+            content_url += f"?{extra_qs}"
+        context["content_url"] = content_url
+        context["rec_id"] = rec.pk
+        context["nav_url"] = (
+            reverse("onboarding-pipeline-tab-nav", kwargs={"rec_id": rec.pk})
+            + f"?view={view_type}"
+        )
+        return context
 
 
 def edit_stage_path(self):
@@ -243,7 +444,7 @@ class CandidatePipeline(Pipeline):
     filter_class = onboarding_filters.OnboardingCandidateFilter
     grouper = "onboarding_stage_id"
     selected_instances_key_name = "selectedCandidateRecords"
-    template_name = "cbv/pipeline/onboarding/stages.html"
+    template_name = "cbv/pipeline/onboarding/stages_v2.html"
     allowed_fields = [
         {
             "field": "onboarding_stage_id",
@@ -290,7 +491,24 @@ class CandidatePipeline(Pipeline):
 
     def get_queryset(self):
         queryset = super().get_queryset()
-        queryset = queryset.annotate(candidate_count=Count("candidate", distinct=True))
+        # OnboardingStageFilter (this grouper's own field_filter_class) has no
+        # task_status field, so a deep link like the dashboard's Stuck Tasks
+        # tile (?task_status=stuck) never touched this count: every stage kept
+        # showing its total candidate count regardless, and a stage with zero
+        # *matching* candidates stayed expanded instead of auto-collapsing,
+        # since that decision reads this same number. The nested candidate
+        # list a few lines of HTML down does filter correctly (via
+        # PipelineCandidateFilter), so the badge looked wrong only until its
+        # own JS later patched it from that list's real count.
+        task_status = self.request.GET.get("task_status")
+        count_filter = (
+            Q(candidate__candidate_id__candidate_task__status=task_status)
+            if task_status
+            else Q()
+        )
+        queryset = queryset.annotate(
+            candidate_count=Count("candidate", filter=count_filter, distinct=True)
+        )
         self.queryset = queryset.order_by("sequence")
         return self.queryset
 
@@ -300,7 +518,7 @@ def stage_drop_down(self):
     Stage drop down
     """
     request = getattr(_thread_locals, "request", None)
-    all_onboarding_stages = getattr(request, "all_rec_stages", {})
+    all_onboarding_stages = getattr(request, "all_onboarding_stages", {})
     if all_onboarding_stages.get(self.onboarding_stage_id.recruitment_id.pk) is None:
         stages = onboarding_models.OnboardingStage.objects.filter(
             recruitment_id=self.onboarding_stage_id.recruitment_id
@@ -369,7 +587,8 @@ class CandidateOnboardingDetail(CandidateDetail):
 
     def get(self, request, *args, **kwargs):
         instance = self.get_object()
-        self.ordered_ids_key = f"ordered_ids_{self.model.__name__.lower()}{instance.onboarding_stage.onboarding_stage_id.pk}"
+        if instance and instance.onboarding_stage:
+            self.ordered_ids_key = f"ordered_ids_{self.model.__name__.lower()}{instance.onboarding_stage.onboarding_stage_id.pk}"
         response = super().get(request, *args, **kwargs)
         return response
 
@@ -388,7 +607,9 @@ class CandidateList(HorillaListView):
     filter_selected = False
     quick_export = False
     next_prev = False
+    records_per_page = 10
     filter_keys_to_remove = ["onboarding_stage_id", "rec_id", "recruitment_id"]
+    template_name = "cbv/pipeline/onboarding/candidate_list.html"
     custom_empty_template = "cbv/pipeline/empty.html"
     header_attrs = {
         "action": "style='width:120px;'",
@@ -542,8 +763,6 @@ class CandidateList(HorillaListView):
             ).update(status=status)
         return response
 
-    records_per_page = 25
-
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.managing_onboarding_tasks = []
@@ -592,16 +811,36 @@ class CandidateList(HorillaListView):
     def get_context_data(self, **kwargs):
         stage_id = self.request.GET["onboarding_stage_id"]
         tasks = onboarding_models.OnboardingTask.objects.filter(stage_id=stage_id)
-        context = super().get_context_data(**kwargs)
+
+        # Per-stage task columns (one per OnboardingTask, plus "+ Task")
+        # used to be appended straight onto context["columns"] AFTER
+        # super().get_context_data() had already built self.toggle_form
+        # from the static `columns` list above -- so they never got a
+        # checkbox in the "Columns" show/hide panel, and (since they were
+        # added after self.visible_column's hidden-column filtering too)
+        # couldn't be hidden even if they had one. Building these tuples
+        # and folding them into self.columns/self.default_columns BEFORE
+        # calling super() makes the base HorillaListView machinery treat
+        # them exactly like any other column, `columns` is a plain class
+        # attribute (not a queryset), and ListView.as_view() gives each
+        # request its own view instance, so this reassignment is
+        # request-local and never leaks between requests.
+        dynamic_columns = []
+        dynamic_toggle_labels = {}
+        dynamic_header_attrs = {}
         for task in tasks:
-            context["columns"].append(
+            col_key = f"get_{task.pk}_task"
+            dynamic_toggle_labels[col_key] = task.task_title
+            col_width = max(150, len(task.task_title) * 7 + 130)
+            dynamic_header_attrs[col_key] = f'style="width:{col_width}px !important;"'
+            dynamic_columns.append(
                 (
                     f"""
                         <div class="group w-full flex items-center justify-between transition duration-300">
                             <span class="px-2 py-1 text-xs">
                                 {task.task_title}
                             </span>
-                            <div class="hidden group-hover:flex items-center transition duration-300 gap-1 p-1 rounded z-10 bg-white"
+                            <div class="flex items-center transition duration-300 gap-1 p-1 rounded z-10 bg-white"
                                 onclick="event.stopPropagation()"
                             >
                                 <button
@@ -627,10 +866,10 @@ class CandidateList(HorillaListView):
                             </div>
                         </div>
                     """,
-                    f"get_{task.pk}_task",
+                    col_key,
                 )
             )
-        context["columns"].append(
+        dynamic_columns.append(
             (
                 f"""
                     <button
@@ -656,6 +895,16 @@ class CandidateList(HorillaListView):
                 "add_task_action",
             )
         )
+        dynamic_toggle_labels["add_task_action"] = _("Add Task")
+        self.columns = self.columns + dynamic_columns
+        self.default_columns = self.default_columns + dynamic_columns
+        self.toggle_labels = {**self.toggle_labels, **dynamic_toggle_labels}
+        self.header_attrs = {**self.header_attrs, **dynamic_header_attrs}
+
+        context = super().get_context_data(**kwargs)
+        context["stage"] = onboarding_models.OnboardingStage.objects.filter(
+            pk=stage_id
+        ).first()
         self.request.session[self.ordered_ids_key] = list(
             self.queryset.values_list("candidate_id__pk", flat=True)
         )
@@ -672,11 +921,14 @@ class CandidateKanbanView(HorillaKanbanView):
     group_key = "onboarding_stage__onboarding_stage_id"
     records_per_page = 10
     show_kanban_confirmation = False
+    # The tab badge counts candidates (set server-side), not stage columns
+    records_count_in_tab = False
     filter_keys_to_remove = ["onboarding_stage_id", "rec_id", "recruitment_id"]
     filter_class = onboarding_filters.KanbanCandidateFilter
     group_filter_class = onboarding_filters.OnboardingStageFilter
     instance_order_by = "onboarding_stage__sequence"
     group_label_key = "stage_title"
+    empty_group_label = _("stages")
     pre_move_check_url = reverse_lazy("onboarding-kanban-required-task-check")
 
     details = {
@@ -906,10 +1158,22 @@ class AssignTask(View):
 
         messages.success(self.request, _("Status updated"))
 
+        # Re-render just this cell instead of clicking `.reload-record`
+        # (which re-fetches and outerHTML-swaps the *entire* candidate
+        # list): that full-table swap is what caused the visible flicker
+        # on every status change, and this dropdown's own hx-target
+        # already scopes the response to `#taskContainer{task_id}{cand_pk}`.
+        # `#reloadMessagesButton` is unrelated to the list table (it just
+        # refreshes the messages panel), so it's kept to still surface the
+        # "Status updated" toast.
+        cell = render_template(
+            "cbv/pipeline/onboarding/tasks.html",
+            {
+                "instance": candidate,
+                "task": candidate_task,
+                "task_id": kwargs["task_id"],
+            },
+        )
         return HttpResponse(
-            f"""
-            <div id="taskHidden{candidate_task.pk}"></div>
-            <script>$('#taskHidden{candidate_task.pk}').closest('.hlv-container').find(".reload-record").click();</script>
-            <script>$('#reloadMessagesButton').click();</script>
-            """
+            cell + "<script>$('#reloadMessagesButton').click();</script>"
         )

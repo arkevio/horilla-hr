@@ -5,6 +5,7 @@ This module is used to map url path with view methods.
 """
 
 from django.urls import path
+from django.views.generic import RedirectView
 
 from base.views import add_remove_dynamic_fields, object_duplicate
 from recruitment import cbvs
@@ -33,11 +34,6 @@ from recruitment.views import linkedin, search, surveys, views
 urlpatterns = [
     path(
         "interview-view/", interview.InterviewViewPage.as_view(), name="interview-view"
-    ),
-    path(
-        "get-cand-tasks/<int:pk>/",
-        candidate_profile.CandidateProfileTasks.as_view(),
-        name="get-cand-task",
     ),
     path(
         "interview-nav-view/",
@@ -121,7 +117,21 @@ urlpatterns = [
         views.recruitment_reopen_pipeline,
         name="recruitment-reopen-pipeline",
     ),
-    path("pipeline/", views.recruitment_pipeline, name="pipeline"),
+    # The pre-CBV pipeline page (views.recruitment_pipeline +
+    # templates/pipeline/*.html) was superseded by PipelineView at
+    # `cbv-pipeline/` but never retired, and it no longer renders correctly:
+    # its Bootstrap-era markup now inherits the Tailwind-restyled global
+    # chrome, so it came up as a broken mix of both. Anything still holding
+    # this url - notifications created before their `redirect` was repointed
+    # (the url is frozen into each row's data at send time), bookmarks, the
+    # post-action `redirect(recruitment_pipeline)` calls in views.py - is
+    # sent to the working page instead. `query_string` keeps `?closed=...`
+    # and friends, which the CBV page reads too.
+    path(
+        "pipeline/",
+        RedirectView.as_view(pattern_name="cbv-pipeline", query_string=True),
+        name="pipeline",
+    ),
     path("pipeline-search/", views.filter_pipeline, name="pipeline-search"),
     path(
         "pipeline-stages-component/<str:view>/",
@@ -483,8 +493,68 @@ urlpatterns = [
     ),
     path(
         "recruitment-survey-question-template-view/",
-        surveys.view_question_template,
+        recruitment_survey.SurveyTemplateSettingsView.as_view(),
         name="recruitment-survey-question-template-view",
+    ),
+    path(
+        "survey-template-filter/",
+        recruitment_survey.SurveyTemplateQuestionsTab.as_view(),
+        name="survey-template-filter",
+    ),
+    path(
+        "list-survey-templates/",
+        recruitment_survey.SurveyTemplateList.as_view(),
+        name="list-survey-templates",
+    ),
+    path(
+        "list-survey-questions/",
+        recruitment_survey.SurveyQuestionList.as_view(),
+        name="list-survey-questions",
+    ),
+    path(
+        "survey-template-nav/",
+        recruitment_survey.SurveyTemplateNavView.as_view(),
+        name="survey-template-nav",
+    ),
+    path(
+        "survey-question-nav/",
+        recruitment_survey.SurveyQuestionNavView.as_view(),
+        name="survey-question-nav",
+    ),
+    path(
+        "survey-template-tab-shell/",
+        recruitment_survey.SurveyTemplateTabShell.as_view(),
+        name="survey-template-tab-shell",
+    ),
+    path(
+        "survey-question-tab-shell/",
+        recruitment_survey.SurveyQuestionTabShell.as_view(),
+        name="survey-question-tab-shell",
+    ),
+    path(
+        "survey-template-settings-tab-view/",
+        recruitment_survey.SurveyTemplateTabView.as_view(),
+        name="survey-template-settings-tab-view",
+    ),
+    path(
+        "survey-template-tab/",
+        surveys.survey_template_tab,
+        name="survey-template-tab",
+    ),
+    path(
+        "survey-template-tab-list/",
+        surveys.survey_template_tab_list,
+        name="survey-template-tab-list",
+    ),
+    path(
+        "survey-question-tab/",
+        surveys.survey_question_tab,
+        name="survey-question-tab",
+    ),
+    path(
+        "survey-question-tab-list/",
+        surveys.survey_question_tab_list,
+        name="survey-question-tab-list",
     ),
     # path(
     #     "recruitment-survey-question-template-create",
@@ -543,11 +613,11 @@ urlpatterns = [
         surveys.candidate_survey,
         name="candidate-survey",
     ),
-    path(
-        "filter-survey/",
-        search.filter_survey,
-        name="rec-filter-survey",
-    ),
+    # path(
+    #     "filter-survey/",
+    #     search.filter_survey,
+    #     name="rec-filter-survey",
+    # ),
     # path(
     #     "single-survey-view/<int:survey_id>/",
     #     surveys.single_survey,
@@ -568,6 +638,16 @@ urlpatterns = [
     #     surveys.create_template,
     #     name="survey-template-create",
     # ),
+    # path(
+    #     "survey-template-delete/<int:pk>/",
+    #     surveys.delete_survey_template,
+    #     name="survey-template-delete",
+    # ),
+    path(
+        "survey-template-delete/<int:pk>/",
+        surveys.delete_survey_template,
+        name="survey-template-delete",
+    ),
     path(
         "survey-template-delete/",
         surveys.delete_template,
@@ -994,6 +1074,16 @@ urlpatterns = [
         name="candidate-card-cbv",
     ),
     path(
+        "recruitment-pipeline-shell/<int:rec_id>/",
+        pipeline.RecruitmentPipelineContentShell.as_view(),
+        name="recruitment-pipeline-shell",
+    ),
+    path(
+        "recruitment-pipeline-tab-nav/<int:rec_id>/",
+        pipeline.RecruitmentCandidateNav.as_view(),
+        name="recruitment-pipeline-tab-nav",
+    ),
+    path(
         "cbv-change-stage/<int:pk>/",
         pipeline.ChangeStage.as_view(),
         name="cbv-change-stage",
@@ -1069,6 +1159,16 @@ urlpatterns = [
         name="recruitment-dashboard-source-quality",
     ),
     path(
+        "dashboard/api/vacancy-vs-hired/",
+        rec_dashboard.recruitment_vacancy_vs_hired,
+        name="recruitment-dashboard-vacancy-hired",
+    ),
+    path(
+        "dashboard/api/talent-pool/",
+        rec_dashboard.recruitment_talent_pool,
+        name="recruitment-dashboard-talent-pool",
+    ),
+    path(
         "dashboard/api/time-to-hire/",
         rec_dashboard.recruitment_time_to_hire,
         name="recruitment-dashboard-time-to-hire",
@@ -1102,6 +1202,11 @@ urlpatterns = [
         "dashboard/api/source-conversion/",
         rec_dashboard.recruitment_source_conversion,
         name="recruitment-dashboard-source-conv",
+    ),
+    path(
+        "dashboard/api/rejection-reasons/",
+        rec_dashboard.recruitment_rejection_reasons,
+        name="recruitment-dashboard-rejection-reasons",
     ),
     path(
         "dashboard/api/joinings/",

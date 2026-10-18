@@ -1,4 +1,3 @@
-from django import views
 from django.apps import apps
 from django.urls import path
 from django.views.generic import RedirectView
@@ -11,7 +10,6 @@ if apps.is_installed("attendance"):
     from leave.cbv import compensatory_leave_request
 
 from base.views import object_duplicate
-from employee.models import Employee
 from leave.cbv import (
     assigned_leave,
     dashboard,
@@ -243,6 +241,11 @@ urlpatterns = [
         views.available_leave_update,
         name="available-leave-update",
     ),
+    path(
+        "leave-balance-ledger/<int:pk>/",
+        views.leave_balance_ledger,
+        name="leave-balance-ledger",
+    ),
     # path("available-leave-update/<int:pk>",assigned_leave.AssignedLeaveFormView.as_view(),name="available-leave-update"),
     path(
         "assign-delete/<int:obj_id>/", views.leave_assign_delete, name="assign-delete"
@@ -251,6 +254,16 @@ urlpatterns = [
         "assigned-leave-bulk-delete/",
         views.leave_assign_bulk_delete,
         name="assigned-leave-bulk-delete",
+    ),
+    path(
+        "leave-request-excel/",
+        views.leave_request_excel,
+        name="leave-request-excel",
+    ),
+    path(
+        "leave-request-info-import/",
+        views.leave_request_import,
+        name="leave-request-info-import",
     ),
     path(
         "assign-leave-type-excel/",
@@ -332,11 +345,6 @@ urlpatterns = [
         RedirectView.as_view(pattern_name="leave-dashboard"),
         name="leave-dashboard-legacy",
     ),
-    path(
-        "leave-employee-dashboard/",
-        views.employee_dashboard,
-        name="leave-employee-dashboard",
-    ),
     path("available-leaves/", views.available_leave_chart, name="available-leaves"),
     path(
         "dashboard-leave-requests/",
@@ -415,6 +423,21 @@ urlpatterns = [
         "leave-allocation-request-delete/<int:req_id>/",
         views.leave_allocation_request_delete,
         name="leave-allocation-request-delete",
+    ),
+    path(
+        "leave-allocation-request-bulk-approve/",
+        views.leave_allocation_bulk_approve,
+        name="leave-allocation-request-bulk-approve",
+    ),
+    path(
+        "leave-allocation-request-bulk-reject/",
+        views.leave_allocation_bulk_reject,
+        name="leave-allocation-request-bulk-reject",
+    ),
+    path(
+        "leave-allocation-request-bulk-delete/",
+        views.leave_allocation_bulk_delete,
+        name="leave-allocation-request-bulk-delete",
     ),
     # path(
     #     "leave-allocation-request-view/",
@@ -647,9 +670,24 @@ urlpatterns = [
         name="leave-allocation-requests-tab-view",
     ),
     path(
-        "nav-leave-allocation-request/",
-        leave_allocation_request.LeaveAllocationRequestNav.as_view(),
-        name="nav-leave-allocation-request",
+        "my-leave-allocation-nav/",
+        leave_allocation_request.MyLeaveAllocationNav.as_view(),
+        name="my-leave-allocation-nav",
+    ),
+    path(
+        "leave-allocation-requests-nav/",
+        leave_allocation_request.LeaveAllocationRequestsNav.as_view(),
+        name="leave-allocation-requests-nav",
+    ),
+    path(
+        "my-leave-allocation-tab-shell/",
+        leave_allocation_request.MyLeaveAllocationTabShell.as_view(),
+        name="my-leave-allocation-tab-shell",
+    ),
+    path(
+        "leave-allocation-requests-tab-shell/",
+        leave_allocation_request.LeaveAllocationRequestsTabShell.as_view(),
+        name="leave-allocation-requests-tab-shell",
     ),
     path(
         "detail-leave-allocation-request/<int:pk>/",
@@ -708,9 +746,9 @@ urlpatterns = [
         name="leave-dashboard-kpi",
     ),
     path(
-        "dashboard/api/monthly-trend/",
-        leave_dashboard.leave_monthly_trend,
-        name="leave-dashboard-monthly-trend",
+        "dashboard/api/department-trend/",
+        leave_dashboard.leave_department_trend,
+        name="leave-dashboard-department-trend",
     ),
     path(
         "dashboard/api/type-distribution/",
@@ -757,31 +795,6 @@ urlpatterns = [
         leave_dashboard.leave_upcoming,
         name="leave-dashboard-upcoming",
     ),
-    path(
-        "employee-dashboard/api/kpi/",
-        leave_dashboard.employee_kpi_data,
-        name="leave-employee-dashboard-kpi",
-    ),
-    path(
-        "employee-dashboard/api/balance/",
-        leave_dashboard.employee_leave_balance,
-        name="employee-dashboard-balance",
-    ),
-    path(
-        "employee-dashboard/api/trend/",
-        leave_dashboard.employee_monthly_trend,
-        name="employee-dashboard-trend",
-    ),
-    path(
-        "employee-dashboard/api/upcoming/",
-        leave_dashboard.employee_upcoming_leaves,
-        name="employee-dashboard-upcoming",
-    ),
-    path(
-        "employee-dashboard/api/history/",
-        leave_dashboard.employee_leave_history,
-        name="employee-dashboard-history",
-    ),
 ]
 
 if apps.is_installed("recruitment"):
@@ -811,8 +824,13 @@ if apps.is_installed("attendance"):
             ),
             path(
                 "compensatory-nav/",
-                compensatory_leave_request.CompensatoryNavView.as_view(),
+                compensatory_leave_request.CompensatoryLeaveNav.as_view(),
                 name="compensatory-nav",
+            ),
+            path(
+                "my-compensatory-nav/",
+                compensatory_leave_request.MyCompensatoryLeaveNav.as_view(),
+                name="my-compensatory-nav",
             ),
             path(
                 "compensatory-tab-view/",
@@ -825,9 +843,19 @@ if apps.is_installed("attendance"):
                 name="my-compensatory-tab",
             ),
             path(
+                "my-compensatory-tab-shell/",
+                compensatory_leave_request.MyCompensatoryTabShell.as_view(),
+                name="my-compensatory-tab-shell",
+            ),
+            path(
                 "compensatory-tab/",
                 compensatory_leave_request.CompensatoryLeaveTab.as_view(),
                 name="compensatory-tab",
+            ),
+            path(
+                "compensatory-tab-shell/",
+                compensatory_leave_request.CompensatoryTabShell.as_view(),
+                name="compensatory-tab-shell",
             ),
             path(
                 "my-compensatory-detail-view/<int:pk>/",

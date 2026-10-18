@@ -7,6 +7,7 @@ from pms import cbvs
 from pms import dashboard as pms_dashboard
 from pms.cbv import (
     dashboard,
+    employee_objectives,
     feedback,
     key_result,
     meetings,
@@ -54,9 +55,44 @@ urlpatterns = [
         name="anonymous-feedback-tab",
     ),
     path(
-        "feedback-nav-view/",
-        feedback.FeedbacknavView.as_view(),
-        name="feedback-nav-view",
+        "self-feedback-nav/",
+        feedback.SelfFeedbackNav.as_view(),
+        name="self-feedback-nav",
+    ),
+    path(
+        "requested-feedback-nav/",
+        feedback.RequestedFeedbackNav.as_view(),
+        name="requested-feedback-nav",
+    ),
+    path(
+        "all-feedback-nav/",
+        feedback.AllFeedbackNav.as_view(),
+        name="all-feedback-nav",
+    ),
+    path(
+        "anonymous-feedback-nav/",
+        feedback.AnonymousFeedbackNav.as_view(),
+        name="anonymous-feedback-nav",
+    ),
+    path(
+        "self-feedback-tab-shell/",
+        feedback.SelfFeedbackTabShell.as_view(),
+        name="self-feedback-tab-shell",
+    ),
+    path(
+        "requested-feedback-tab-shell/",
+        feedback.RequestedFeedbackTabShell.as_view(),
+        name="requested-feedback-tab-shell",
+    ),
+    path(
+        "all-feedback-tab-shell/",
+        feedback.AllFeedbackTabShell.as_view(),
+        name="all-feedback-tab-shell",
+    ),
+    path(
+        "anonymous-feedback-tab-shell/",
+        feedback.AnonymousFeedbackTabShell.as_view(),
+        name="anonymous-feedback-tab-shell",
     ),
     # objectives
     # path("objective-list-view/", views.objective_list_view, name="objective-list-view"),
@@ -665,11 +701,6 @@ urlpatterns = [
         name="tab-objectives-view",
     ),
     path(
-        "nav-objectives-view/",
-        objectives.ObjectivesNav.as_view(),
-        name="nav-objectives-view",
-    ),
-    path(
         "nav-objective-templates-view/",
         objectives.ObjectiveTemplateNav.as_view(),
         name="nav-objective-templates-view",
@@ -685,9 +716,59 @@ urlpatterns = [
         name="all-objectives-view-tab",
     ),
     path(
+        "my-objectives-nav/",
+        objectives.MyObjectivesNav.as_view(),
+        name="my-objectives-nav",
+    ),
+    path(
+        "all-objectives-nav/",
+        objectives.AllObjectivesNav.as_view(),
+        name="all-objectives-nav",
+    ),
+    path(
+        "my-objectives-tab-shell/",
+        objectives.MyObjectivesTabShell.as_view(),
+        name="my-objectives-tab-shell",
+    ),
+    path(
+        "all-objectives-tab-shell/",
+        objectives.AllObjectivesTabShell.as_view(),
+        name="all-objectives-tab-shell",
+    ),
+    path(
         "list-objective-templates-view/",
         objectives.ObjectiveTemplateList.as_view(),
         name="list-objective-templates-view",
+    ),
+    path(
+        "employee-objective-list-view/",
+        employee_objectives.EmployeeObjectivesPage.as_view(),
+        name="employee-objective-list-view",
+    ),
+    path(
+        "employee-objectives-nav/",
+        employee_objectives.EmployeeObjectivesNav.as_view(),
+        name="employee-objectives-nav",
+    ),
+    path(
+        "employee-objectives-list/",
+        employee_objectives.EmployeeObjectivesList.as_view(),
+        name="employee-objectives-list",
+    ),
+    path(
+        "employee-key-result-list-view/",
+        employee_objectives.EmployeeKeyResultsPage.as_view(),
+        name="employee-key-result-list-view",
+    ),
+    path(
+        "employee-key-results-nav/",
+        employee_objectives.EmployeeKeyResultsNav.as_view(),
+        name="employee-key-results-nav",
+    ),
+    path(
+        "employee-key-results-list/",
+        employee_objectives.EmployeeKeyResultsList.as_view(),
+        name="employee-key-results-list",
     ),
     path("view-meetings/", meetings.MeetingsView.as_view(), name="view-meetings"),
     path("meetings-list/", meetings.MeetingsList.as_view(), name="meetings-list"),
@@ -765,21 +846,6 @@ urlpatterns = [
         name="performance-settings-bonus-point-tab",
     ),
     path(
-        "performance-settings-objective-template-tab/",
-        settings_tabs.PerformanceSettingsObjectiveTemplateTab.as_view(),
-        name="performance-settings-objective-template-tab",
-    ),
-    path(
-        "performance-settings-objective-template-nav/",
-        settings_tabs.PerformanceSettingsObjectiveTemplateNav.as_view(),
-        name="performance-settings-objective-template-nav",
-    ),
-    path(
-        "performance-settings-objective-template-list/",
-        settings_tabs.PerformanceSettingsObjectiveTemplateList.as_view(),
-        name="performance-settings-objective-template-list",
-    ),
-    path(
         "performance-settings-question-template-tab/",
         settings_tabs.PerformanceSettingsQuestionTemplateTab.as_view(),
         name="performance-settings-question-template-tab",
@@ -833,6 +899,11 @@ urlpatterns = [
         "bonus-point-setting-list-view/",
         cbvs.BonusPointSettingListView.as_view(),
         name="bonus-point-setting-list-view",
+    ),
+    path(
+        "bonus-point-setting-detail-view/<int:pk>/",
+        cbvs.BonusPointSettingDetailView.as_view(),
+        name="bonus-point-setting-detail-view",
     ),
     path(
         "bonus-setting-form-values/",
@@ -909,11 +980,6 @@ urlpatterns = [
         name="pms-dashboard-dept",
     ),
     path(
-        "dashboard/api/at-risk/",
-        pms_dashboard.pms_at_risk_objectives,
-        name="pms-dashboard-at-risk",
-    ),
-    path(
         "dashboard/api/performers/",
         pms_dashboard.pms_top_performers,
         name="pms-dashboard-performers",
@@ -927,15 +993,5 @@ urlpatterns = [
         "dashboard/api/meetings/",
         pms_dashboard.pms_upcoming_meetings,
         name="pms-dashboard-meetings",
-    ),
-    path(
-        "dashboard/api/progress-trend/",
-        pms_dashboard.pms_progress_trend,
-        name="pms-dashboard-progress-trend",
-    ),
-    path(
-        "dashboard/api/feedback-completion/",
-        pms_dashboard.pms_feedback_completion,
-        name="pms-dashboard-fb-completion",
     ),
 ]

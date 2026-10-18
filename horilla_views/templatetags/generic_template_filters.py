@@ -16,7 +16,7 @@ from django.conf import settings
 from django.contrib.auth.context_processors import PermWrapper
 from django.db.models import Model, QuerySet
 from django.db.models.utils import AltersData
-from django.template.defaultfilters import register
+from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
@@ -52,6 +52,15 @@ time_format_mapping = {
 
 @register.filter(name="selected_format")
 def selected_format(date, company: object = None) -> str:
+    if isinstance(date, datetime.datetime):
+        if timezone.is_aware(date):
+            date = timezone.localtime(date)
+        date_format = getattr(company, "date_format", None) or "MMM. D, YYYY"
+        time_format = getattr(company, "time_format", None) or "hh:mm A"
+        return date.strftime(
+            f"{date_format_mapping.get(date_format, '%b. %d, %Y')} "
+            f"{time_format_mapping.get(time_format, '%I:%M %p')}"
+        )
     if not isinstance(date, (datetime.date, datetime.time)):
         try:
             date = datetime.datetime.fromisoformat(date)
@@ -80,6 +89,14 @@ def cell_tooltip(value) -> str:
     text = str(value)
     if re.search(r"<\s*(select|input|textarea|button|form)\b", text, re.IGNORECASE):
         return ""
+    # strip_tags removes tag markup but not the text content of <style>/<script>
+    # blocks, so drop those elements entirely before stripping the rest.
+    text = re.sub(
+        r"<\s*(style|script)\b[^>]*>.*?<\s*/\s*\1\s*>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
     return re.sub(r"\s+", " ", strip_tags(text)).strip()
 
 
@@ -179,6 +196,9 @@ def employee_profile_url(obj):
     from django.urls import NoReverseMatch, reverse
 
     from employee.models import Employee
+
+    if getattr(obj, "disable_employee_profile_link", False):
+        return ""
 
     employee = obj if isinstance(obj, Employee) else getattr(obj, "employee_id", None)
     if isinstance(employee, Employee):
@@ -366,4 +386,26 @@ def elided_page_range(page):
         for p in page.paginator.get_elided_page_range(
             page.number, on_each_side=1, on_ends=1
         )
+    ]
+
+
+@register.filter(name="with_dot")
+def with_dot(row_status_indications):
+    """
+    Splits a row_status_indications list (see quick_actions.html) into the
+    entries that carry a real status-dot class -- e.g. "approved--dot" --
+    kept as individually visible pills. Pairs with without_dot below, which
+    are instead collapsed into a single "Quick Date"-style dropdown so a
+    long list of plain action buttons (no color to scan for) doesn't blow
+    out the toolbar's width the way a row of status dots earns.
+    """
+    # Views that define no status indications (e.g. a kanban with none) pass None.
+    return [indication for indication in row_status_indications or [] if indication[0]]
+
+
+@register.filter(name="without_dot")
+def without_dot(row_status_indications):
+    """See with_dot above."""
+    return [
+        indication for indication in row_status_indications or [] if not indication[0]
     ]

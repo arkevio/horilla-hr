@@ -55,6 +55,14 @@
 
     <div class="bg-white p-3 rounded-md shadow-card oh-tabs">
         {% if not tabs %}
+            {% if tab_create_attrs %}
+                <div class="flex justify-end">
+                    <button type="button" class="oh-btn oh-btn--secondary" {{ tab_create_attrs|safe }}>
+                        <ion-icon name="add-outline"></ion-icon>
+                        {{ tab_create_label|default:_("Create") }}
+                    </button>
+                </div>
+            {% endif %}
             <div class="flex flex-col items-center justify-center py-10">
                 <img src="/static/horilla_theme/assets/img/no-records.svg" alt="" width="200" class="mb-4">
                 <p class="text-[#666]">{% trans "No records available at the moment" %}</p>
@@ -97,49 +105,19 @@
                                 {% if tab.badge|default:0 > 999 %}999+{% else %}{{ tab.badge|default:0 }}{% endif %}
                             </span>
 
-                            {{ tab.title }} {% if tab.actions %}
-                                <span
-                                    class="ps-3 cursor-pointer w-[20px]"
-                                    onclick="actionClick(event)"
-                                    title="{% trans 'Actions' %}"
-                                >
-                                    <i class="fa-solid fa-ellipsis-vertical text-black mr-1"></i>
-                                </span>
-                            {% endif %}
+                            {{ tab.title }}
                         </button>
-
-                        {% if tab.actions %}
-                            <div class="dropdown-menu absolute right-0 min-w-[100px] bg-white rounded-lg shadow-card py-2 hidden z-50 transition-all duration-200">
-                                <ul class="text-xs">
-                                    {% for action in tab.actions %}
-                                        {% if instance %}
-                                            {% if action.accessibility|accessibility:instance %}
-                                                <li>
-                                                    <a
-                                                        {{ action.attrs|safe }}
-                                                        class="block w-full text-left px-3 py-1 hover:text-primary-600 transition duration-300 cursor-pointer"
-                                                    >
-                                                        {{ action.action }}
-                                                    </a>
-                                                </li>
-                                            {% endif %}
-                                        {% else %}
-                                            <li>
-                                                <a
-                                                    {{ action.attrs|safe }}
-                                                    class="block w-full text-left px-3 py-1 hover:text-primary-600 transition duration-300 cursor-pointer"
-                                                >
-                                                    {{ action.action }}
-                                                </a>
-                                            </li>
-                                        {% endif %}
-                                    {% endfor %}
-                                </ul>
-                            </div>
-                        {% endif %}
                     </div>
                 {% endfor %}
             </div>
+            {% if tab_create_attrs %}
+                <div class="flex items-start">
+                    <button type="button" class="oh-btn oh-btn--secondary" {{ tab_create_attrs|safe }}>
+                        <ion-icon name="add-outline"></ion-icon>
+                        {{ tab_create_label|default:_("Create") }}
+                    </button>
+                </div>
+            {% endif %}
         </div>
 
         <div class="oh-tabs__contents">
@@ -201,7 +179,16 @@
     		detail: { tabUrl: $elem.attr('data-tab-url'), target: target }
     	}));
 
-    	let url_target = `[data-target="${target}"]`
+    	// Persisted by tab POSITION, not by this render's `target` id: `target`
+    	// embeds `view_id`, a fresh random string generated on every request
+    	// (HorillaTabView.__init__), so a selector like `[data-target="#htv95a4"]`
+    	// saved now can never match anything after a reload regenerates
+    	// `view_id` to e.g. `htv5de1` -- the stored preference silently failed
+    	// to restore every single time, always falling back to the first tab.
+    	// `data-tab-index` is the tab's 0-based position, stable across
+    	// `view_id` regeneration, so this selector still resolves next load.
+    	let tabIndex = $elem.data("tab-index")
+    	let url_target = `[data-tab-index="${tabIndex}"]`
     	$.ajax({
     		type: "get",
     		url: "{% url 'active-tab' %}",
@@ -234,6 +221,31 @@
     			$preferred = $tabs.first();
     		}
 
+    		// Guarantee exactly one tab is marked active before any content
+    		// loads. The markup above only pre-applies the active classes when
+    		// there's no `active_target`, on the assumption that a stored
+    		// target will match one of these tabs -- but `view_id` is a fresh
+    		// random id on every request (get_short_uuid in HorillaTabView),
+    		// while `active_target` is a selector persisted from an EARLIER
+    		// render (`[data-target="#htv21d1"]`, keyed only by request.path).
+    		// So a stored target can never match the current generation's ids:
+    		// the markup's conditional suppressed the render-time active
+    		// class, the selector above found nothing, and the page was left
+    		// with content loaded but every .oh-tabs__content still
+    		// display:none -- a blank page. Applying it here (rather than
+    		// trusting switchTab() later, which bails out for a detached
+    		// $elem) makes the fallback choice and the visible state agree
+    		// no matter which branch above won.
+    		if (!$preferred.hasClass("oh-tabs__tab--active")) {
+    			$tabs.removeClass("oh-tabs__tab--active");
+    			$preferred.addClass("oh-tabs__tab--active");
+    		}
+    		var preferredTarget = $preferred.attr("data-target");
+    		if (preferredTarget) {
+    			$scope.find(".oh-tabs__content").removeClass("oh-tabs__content--active");
+    			$(preferredTarget).addClass("oh-tabs__content--active");
+    		}
+
     		// Load one tab's content and resolve once its swap has settled.
     		function loadTab(el) {
     			// This whole tab view can be torn down and re-rendered with a
@@ -256,7 +268,16 @@
     			$(el).attr('data-loaded', 'true');
     			var req = htmx.ajax('GET', url, {target: target, source: el});
     			if (req && typeof req.then === 'function') {
-    				return req.catch(function () {});
+    				// A failed/aborted request never swaps into `target`, so
+    				// it's left empty indefinitely with no indication
+    				// anything went wrong -- render an explicit retry state
+    				// instead of silently swallowing the failure.
+    				return req.catch(function () {
+    					$(el).removeAttr('data-loaded');
+    					if (typeof renderLoadFailure === 'function') {
+    						renderLoadFailure(target, null, "htmx.ajax('GET', '" + url + "', {target: '" + target + "'});");
+    					}
+    				});
     			}
     			return $.Deferred().resolve().promise();
     		}
@@ -287,55 +308,5 @@
     	}
 
     	triggerInitialTabLoad();
-    });
-
-    function actionClick(event) {
-    	event.stopPropagation(); // Prevents closing when clicking inside
-    	const icon = event.currentTarget;
-    	const wrapper = $(icon).closest(".dropdown-wrapper-tab");
-    	const dropdownMenu = wrapper.find(".dropdown-menu");
-
-    	// Close all other dropdowns
-    	$(".dropdown-menu").not(dropdownMenu).addClass("hidden");
-
-    	// Always (re-)open this icon's own menu rather than toggling it shut —
-    	// closing is handled exclusively by the outside-click listener below.
-    	// A toggle here would close the menu right back if this handler ever
-    	// ran twice for what looks like one click (observed as the menu
-    	// opening and instantly closing again).
-    	const rect = wrapper[0].getBoundingClientRect();
-    	dropdownMenu.css({
-    		// The tab bar (.oh-tabs__tab-scroll) needs overflow-y: hidden so
-    		// its horizontal scrollbar doesn't grow a vertical one too, but
-    		// that same rule clips any absolutely-positioned dropdown that
-    		// opens below it. Escape the clip with viewport-fixed
-    		// positioning, anchored to the toggle icon's current location.
-    		position: "fixed",
-    		top: rect.bottom + "px",
-    		left: "auto",
-    		right: (window.innerWidth - rect.right) + "px",
-    	});
-    	dropdownMenu.removeClass("hidden");
-    }
-
-    document.addEventListener("click", function (e) {
-    	// Ignore synthetic clicks — triggerInitialTabLoad() above fires a
-    	// script-generated `.click()` on the preferred tab shortly after
-    	// page load to lazy-load its content (isTrusted: false). If a user's
-    	// first real click just opened a *different* tab's dropdown before
-    	// that delayed auto-click lands, treating it as a genuine outside
-    	// click here would immediately close the menu the user just opened.
-    	if (!e.isTrusted) {
-    		return;
-    	}
-
-    	const $clickedWrapper = $(e.target).closest(".dropdown-wrapper-tab");
-
-    	$(".dropdown-wrapper-tab").each(function () {
-    		const $wrapper = $(this);
-    		if (!$wrapper.is($clickedWrapper)) {
-    			$wrapper.find(".dropdown-menu").addClass("hidden");
-    		}
-    	});
     });
 </script>

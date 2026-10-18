@@ -35,6 +35,17 @@ function getCookie(name) {
     return cookieValue;
 }
 
+// Re-run the activity nav's current search/filter, which swaps a fresh list
+// into #listContainer.
+function refreshAttendanceActivityList() {
+    var apply = document.getElementById("applyFilter");
+    if (apply) {
+        apply.click();
+    } else {
+        location.reload();
+    }
+}
+
 function deleteAttendanceNav() {
     ids = [];
     ids.push($("#selectedInstances").attr("data-ids"));
@@ -67,7 +78,10 @@ function deleteAttendanceNav() {
                         ids: JSON.stringify(ids),
                     },
                     complete: function () {
-                        refreshAttendanceListContainer();
+                        // This is the Check-in / Check-out Log page: reload its own
+                        // list. refreshAttendanceListContainer() reloads the
+                        // Attendances tab view, which is a different page.
+                        refreshAttendanceActivityList();
                     },
                 });
             }
@@ -314,7 +328,13 @@ function otBulkValidateTabAttendance(dataReqValue) {
 
 function attendanceTabReloadUrl() {
     var url = "/attendance/attendances-tab-view/";
-    var form = document.getElementById("filterForm");
+    // Each tab now carries its own independent Nav (its own #filterForm),
+    // so scope the lookup to the active tab's own subtree - a bare
+    // document.getElementById("filterForm") would always resolve to
+    // whichever tab's form happens to sit first in the DOM once more than
+    // one tab has been visited.
+    var activeTab = document.querySelector("#attendances-tab .oh-tabs__content--active");
+    var form = (activeTab && activeTab.querySelector("#filterForm")) || document.getElementById("filterForm");
     if (form && typeof jQuery !== "undefined") {
         var params = jQuery(form).serialize();
         if (params) {

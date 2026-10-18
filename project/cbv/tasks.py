@@ -124,6 +124,24 @@ class TaskListView(HorillaListView):
             (get_field("status").verbose_name, "status"),
         ]
 
+    row_status_class = "status-{status}"
+
+    row_attrs = """
+        hx-get='{task_detail_view}?instance_ids={ordered_ids}'
+        hx-target="#genericModalBody"
+        data-target="#genericModal"
+        data-toggle="oh-modal-toggle"
+    """
+
+    nested_group_by_fields = [
+        "project",
+        "stage",
+        "status",
+        "is_active",
+        "start_date",
+        "end_date",
+    ]
+
     row_status_indications = [
         (
             "todo--dot",
@@ -166,32 +184,8 @@ class TaskListView(HorillaListView):
             """,
         ),
     ]
-
-    row_status_class = "status-{status}"
-
-    row_attrs = """
-        hx-get='{task_detail_view}?instance_ids={ordered_ids}'
-        hx-target="#genericModalBody"
-        data-target="#genericModal"
-        data-toggle="oh-modal-toggle"
-    """
-
-    # Mirrors TasksNavBar.nested_group_by_fields below -- List and Nav
-    # are separate classes/templates (see employee/cbv/employees.py's
-    # EmployeesList/EmployeeNav for the same split). "Task Managers" and
-    # "Task Members" are deliberately left out: they're ManyToManyFields,
-    # and the nested engine's `values(*fields).annotate(Count("pk"))`
-    # aggregate would fan out one row per related employee, double-
-    # counting tasks with more than one manager/member assigned.
-    nested_group_by_fields = [
-        "title",
-        "project",
-        "stage",
-        "status",
-        "is_active",
-        "start_date",
-        "end_date",
-    ]
+    show_quick_date_filters = True
+    quick_date_fields = ("end_date", "end_from", "end_till")
 
 
 @method_decorator(login_required, name="dispatch")
@@ -205,11 +199,9 @@ class TasksNavBar(HorillaNavView):
         "stage",
         "status",
     ]
-    default_group_by = "project"
+    default_group_by = "status"
 
-    # Mirrors TaskListView.nested_group_by_fields
     nested_group_by_fields = [
-        "title",
         "project",
         "stage",
         "status",
@@ -221,25 +213,26 @@ class TasksNavBar(HorillaNavView):
     filter_instance = TaskAllFilter()
     search_swap_target = "#listContainer"
     filter_body_template = "cbv/tasks/task_filter.html"
+    modern_filter = True
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.search_url = reverse("tasks-list-view")
+        self.search_url = reverse("tasks-card-view")
         self.view_types = [
-            {
-                "type": "list",
-                "icon": "list-outline",
-                "url": reverse("tasks-list-view"),
-                "attrs": f"""
-                    title ='{_("List")}'
-                """,
-            },
             {
                 "type": "card",
                 "icon": "grid-outline",
                 "url": reverse("tasks-card-view"),
                 "attrs": f"""
                     title ='{_("Card")}'
+                """,
+            },
+            {
+                "type": "list",
+                "icon": "list-outline",
+                "url": reverse("tasks-list-view"),
+                "attrs": f"""
+                    title ='{_("List")}'
                 """,
             },
         ]
@@ -495,6 +488,8 @@ class TaskDetailView(HorillaDetailedView):
             (get_field("task_members").verbose_name, "get_members"),
             (get_field("status").verbose_name, "get_status_display"),
             (get_field("end_date").verbose_name, "end_date"),
+            (get_field("allocated_hours").verbose_name, "allocated_hours"),
+            ("", "timesheet_progress_col", True),
             (get_field("document").verbose_name, "document_col", True),
             (get_field("description").verbose_name, "description"),
         ]
@@ -502,6 +497,7 @@ class TaskDetailView(HorillaDetailedView):
     cols = {
         "get_managers": 12,
         "get_members": 12,
+        "timesheet_progress_col": 12,
         "description": 12,
     }
 
@@ -518,6 +514,7 @@ class TaskCardView(HorillaKanbanView):
     filter_keys_to_remove = ["field"]
     group_key = "status"
     show_kanban_confirmation = False
+    custom_card_content_template = "cbv/tasks/task_card_extra.html"
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -562,6 +559,9 @@ class TaskCardView(HorillaKanbanView):
             },
         ]
 
+    show_quick_date_filters = True
+    quick_date_fields = ("end_date", "end_from", "end_till")
+
     def get_queryset(self):
         self.queryset = super().get_queryset()
         active = (
@@ -596,7 +596,6 @@ class TaskCardView(HorillaKanbanView):
         "title": "{title}",
         "Project": "{if_project}",
         "Stage": "{stage}",
-        "End Date": "{end_date}",
     }
 
     kanban_attrs = """
@@ -637,6 +636,7 @@ class TasksInIndividualView(TaskListView):
 
     show_filter_tags = False
     row_status_indications = None
+    show_quick_date_filters = False
     bulk_select_option = False
     action_method = None
     custom_empty_template = "cbv/projects/compact_empty.html"

@@ -116,34 +116,63 @@ def offboarding_kpi_data(request):
     )
 
 
+#: (OffboardingStage.type, tile label) in pipeline order. OffboardingStage
+#: rows are per-Offboarding-template -- every company/template gets its own
+#: "Notice Period" / "Exit Interview" / etc. row -- so grouping by the stage
+#: *row* (as this endpoint used to) renders one tile per template instead of
+#: one tile per stage, e.g. 3 templates x 6 types = 18 tiles. Grouping by
+#: `type` instead collapses that back to exactly one tile per pipeline step,
+#: matching every other pipeline widget in the app (Payslip/Project Pipeline).
+PIPELINE_STAGE_TYPES = (
+    ("notice_period", _("Notice Period")),
+    ("interview", _("Exit Interview")),
+    ("handover", _("Work Handover")),
+    ("fnf", _("FNF")),
+    ("other", _("Farewell")),
+    ("archived", _("Archived")),
+)
+
+
 @login_required
 @permission_required("offboarding.view_offboarding")
 def offboarding_pipeline(request):
-    """Employees grouped by offboarding stage (offboardings opened within the selected period)."""
-    from offboarding.models import OffboardingEmployee, OffboardingStage
+    """Employees grouped by offboarding stage type -- one tile per stage.
 
-    from_date, to_date = _parse_period(request)
-    stages = []
+    Live pipeline state, not scoped to the date picker: an employee doesn't
+    stop being "in the pipeline" just because their offboarding record
+    predates the selected period (same rationale as active_offboarding /
+    archived in offboarding_kpi_data above, and as project_status_pipeline
+    in project/dashboard.py).
+    """
+    from collections import Counter
 
-    try:
-        stage_qs = OffboardingStage.objects.all().order_by("sequence")
-        for stage in stage_qs:
-            count = OffboardingEmployee.objects.filter(
-                stage_id=stage,
-                created_at__date__gte=from_date,
-                created_at__date__lte=to_date,
-            ).count()
-            stages.append(
-                {
-                    "stage": stage.title,
-                    "type": stage.type,
-                    "count": count,
-                }
-            )
-    except Exception:
-        pass
+    from offboarding.models import OffboardingEmployee
 
-    return JsonResponse({"stages": stages})
+    # HorillaCompanyManager.get_queryset() applies .distinct() whenever the
+    # company OR-filter is active, which silently corrupts any aggregation
+    # built on top of it. This isn't limited to .values().annotate(Count())
+    # -- a *plain* .values_list("stage_id__type", flat=True) is just as
+    # broken: Django compiles it as `SELECT DISTINCT stage_type FROM ...`,
+    # which deduplicates on the VALUE, not the row, so two different
+    # employees who both happen to be "archived" collapse into one row and
+    # get undercounted. (Project/Task's equivalent pipeline queries in
+    # project/dashboard.py happen to dodge this only because those models
+    # have a default `ordering`, which Django folds into the SELECT DISTINCT
+    # list to satisfy ORDER BY -- an accident of unrelated Meta config, not
+    # a real fix; OffboardingEmployee has no such ordering.) Pulling `pk`
+    # alongside the field forces every row to stay distinct regardless of
+    # ordering, so the Python-side Counter below sees every row once.
+    counts = Counter(
+        stage_type
+        for _pk, stage_type in OffboardingEmployee.objects.filter(
+            stage_id__isnull=False
+        ).values_list("pk", "stage_id__type")
+    )
+    stages = [
+        {"stage": str(label), "type": stage_type, "count": counts.get(stage_type, 0)}
+        for stage_type, label in PIPELINE_STAGE_TYPES
+    ]
+    return JsonResponse({"stages": stages, "total": sum(counts.values())})
 
 
 @login_required
@@ -273,24 +302,22 @@ def offboarding_exit_reasons(request):
 @login_required
 @permission_required("offboarding.view_offboarding")
 def offboarding_notice_period_tracker(request):
-    """Employees with notice periods overlapping the selected period."""
+    """Employees whose notice period ends within the next 30 days."""
     from offboarding.models import OffboardingEmployee
 
-    from_date, to_date = _parse_period(request)
     today = date.today()
     employees = []
+    total = 0
 
     try:
-        qs = (
-            OffboardingEmployee.objects.filter(
-                notice_period_ends__isnull=False,
-                notice_period_starts__lte=to_date,
-                notice_period_ends__gte=from_date,
-            )
-            .exclude(stage_id__type="archived")
-            .select_related("employee_id", "stage_id")
-            .order_by("notice_period_ends")[:15]
-        )
+        in_notice = OffboardingEmployee.objects.filter(
+            notice_period_ends__gte=today,
+            notice_period_ends__lte=today + timedelta(days=30),
+        ).exclude(stage_id__type="archived")
+        total = in_notice.count()
+        qs = in_notice.select_related(
+            "employee_id", "stage_id", "stage_id__offboarding_id"
+        ).order_by("notice_period_ends")[:15]
 
         for oe in qs:
             emp = oe.employee_id
@@ -302,6 +329,9 @@ def offboarding_notice_period_tracker(request):
                     "id": emp.id if emp else None,
                     "name": emp.get_full_name() if emp else "—",
                     "avatar": emp.get_avatar() if emp else None,
+                    "offboarding_id": (
+                        oe.stage_id.offboarding_id_id if oe.stage_id else None
+                    ),
                     "stage": oe.stage_id.title if oe.stage_id else "—",
                     "notice_ends": (
                         oe.notice_period_ends.strftime("%b %d, %Y")
@@ -323,15 +353,16 @@ def offboarding_notice_period_tracker(request):
     except Exception:
         pass
 
-    return JsonResponse({"employees": employees})
+    return JsonResponse({"employees": employees, "total": total})
 
 
 @login_required
 @permission_required("offboarding.view_offboarding")
 def offboarding_unreturned_assets(request):
-    """Unreturned assets from employees offboarded within the selected period."""
+    """Unreturned assets of employees whose notice period ends within the selected period."""
     from_date, to_date = _parse_period(request)
     assets = []
+    total = 0
 
     try:
         if apps.is_installed("asset"):
@@ -339,14 +370,16 @@ def offboarding_unreturned_assets(request):
             from offboarding.models import OffboardingEmployee
 
             offboarding_emp_ids = OffboardingEmployee.objects.filter(
-                created_at__date__gte=from_date,
-                created_at__date__lte=to_date,
+                notice_period_ends__gte=from_date,
+                notice_period_ends__lte=to_date,
             ).values_list("employee_id", flat=True)
 
-            qs = AssetAssignment.objects.filter(
+            unreturned = AssetAssignment.objects.filter(
                 assigned_to_employee_id__in=offboarding_emp_ids,
                 return_status__isnull=True,
-            ).select_related("assigned_to_employee_id", "asset_id")[:15]
+            )
+            total = unreturned.count()
+            qs = unreturned.select_related("assigned_to_employee_id", "asset_id")[:15]
 
             for aa in qs:
                 emp = aa.assigned_to_employee_id
@@ -365,14 +398,13 @@ def offboarding_unreturned_assets(request):
     except Exception:
         pass
 
-    return JsonResponse({"assets": assets})
+    return JsonResponse({"assets": assets, "total": total})
 
 
 @login_required
 @permission_required("offboarding.view_offboarding")
 def offboarding_joining_vs_exiting(request):
-    """Monthly joining vs exiting trend within the selected period."""
-    from employee.models import EmployeeWorkInformation
+    """Monthly exiting count within the selected period."""
     from offboarding.models import ResignationLetter
 
     from_date, to_date = _parse_period(request)
@@ -388,11 +420,6 @@ def offboarding_joining_vs_exiting(request):
         month_start = cursor
         month_end = next_month - timedelta(days=1)
 
-        joining = EmployeeWorkInformation.objects.filter(
-            date_joining__gte=month_start,
-            date_joining__lte=month_end,
-        ).count()
-
         exiting = ResignationLetter.objects.filter(
             planned_to_leave_on__gte=month_start,
             planned_to_leave_on__lte=month_end,
@@ -402,7 +429,6 @@ def offboarding_joining_vs_exiting(request):
         months.append(
             {
                 "month": month_start.strftime("%b %Y"),
-                "joining": joining,
                 "exiting": exiting,
                 "from_date": month_start.isoformat(),
                 "to_date": month_end.isoformat(),

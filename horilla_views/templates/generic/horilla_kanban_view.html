@@ -30,18 +30,41 @@
 
     {% if show_filter_tags %} {% include "generic/filter_tags.html" %} {% endif %}
 
+    {% with row_status_indications=card_status_indications %}
+        {% include "generic/quick_actions.html" with hide_pagination=True %}
+    {% endwith %}
+
     <div
         id="helperContainer"
         class="hidden"
         data-model = "{{ model_name }}"
-        data-app-label="{{ app_label }}"
-        data-group-key = "{{view.group_key}}"
-        data-instance-order-by = "{{view.instance_order_by}}"
-        data-group-order-by = "{{view.group_order_by}}"
+        data-kanban-url = "{{ request.get_full_path }}"
         data-pre-move-check-url = "{{ view.pre_move_check_url }}"
-    > </div>
+    >{% csrf_token %}</div>
 
     <div class="flex gap-2.5 flex-nowrap overflow-auto groupContainer">
+        {% if not grouped_items %}
+            {# This board has no columns to group records into (e.g. a       #}
+            {# recruitment with zero stages) - grouped_items is then empty   #}
+            {# and the loop below renders nothing, leaving a blank board     #}
+            {# with no indication why. empty_group_label lets each view name #}
+            {# its own columns (recruitment/onboarding: "stages", project:   #}
+            {# "statuses", ...) since this template is shared by every       #}
+            {# kanban board; views that don't set it fall back to "groups".  #}
+            <div class="oh-wrapper" align="center" style="margin-top: 7vh; margin-bottom: 7vh; width: 100%;">
+                <div align="center">
+                    <img
+                        src='{% static "images/ui/search.svg" %}'
+                        class="oh-404__image"
+                        alt="{% trans 'Page not found. 404.' %}"
+                    >
+                    <h1 class="oh-404__title">{% blocktrans with label=empty_group_label|default:_("groups") %}No {{ label }} found{% endblocktrans %}</h1>
+                    <p class="oh-404__subtitle">
+                        {% blocktrans with label=empty_group_label|default:_("groups") %}There are no {{ label }} to display.{% endblocktrans %}
+                    </p>
+                </div>
+            </div>
+        {% endif %}
         {% for key, group in grouped_items.items %}
 
         <div
@@ -51,14 +74,6 @@
             data-group-instance = "{{group.label}}"
         >
 
-            <button
-                hidden
-                class="reload-badge"
-                hx-get="{% url 'get-kanban-card-count' %}?model={{app_label}}.{{model_name}}&group_key={{view.group_key}}&group_id={{key}}"
-                hx-target="#groupCount{{key}}"
-                hx-swap="innerHTML"
-            >
-            </button>
             <div class="oh-kanban__section-head sticky top-0 z-[9]">
                 <div
                     class="kanban-head flex items-center justify-between bg-[#e9edf090] backdrop-blur-sm py-2 cursor-move column-drag-handle oh-tabs__movable-header"
@@ -142,29 +157,44 @@
 {% if not is_choice_group %}
 	<script>
 		$(document).ready(function () {
-			setTimeout(function() {
-				initializeSortable();
-			}, 50);
+			var attempts = 0;
+			(function runInitializeSortable() {
+				if (typeof initializeSortable === "function") {
+					initializeSortable();
+				} else if (attempts++ < 40) {
+					setTimeout(runInitializeSortable, 50);
+				}
+			})();
 		});
 	</script>
 {% endif %}
 
 <script>
 	$(document).on("htmx:afterSettle", function (event) {
-		$(document).off("click.dropdown");
-		$(".dropdown-toggle").off("click.dropdown");
+		// Scoped to THIS kanban instance's own `.dropdown-toggle` elements
+		// (group-header and card actions) only: other components on the
+		// page — e.g. a pipeline shell's own "Actions" kebab rendered
+		// above this kanban board — reuse the same `dropdown-toggle`/
+		// `dropdown-menu` class names for an unrelated dropdown. A bare
+		// $(".dropdown-toggle") previously matched those too, so opening
+		// them immediately re-triggered this handler's rebind and closed
+		// them again on the same click. The document-level close handler
+		// is namespaced per kanban instance (view_id) rather than plain
+		// "click.dropdown" so re-registering it on the next afterSettle
+		// only replaces this instance's own handler, not every kanban
+		// board's.
+		var kanbanRoot = $("#{{ view_id|safe }}");
+		var closeNamespace = "click.dropdown-{{ view_id|safe }}";
+		var kanbanToggles = kanbanRoot.find(".dropdown-toggle");
 
-		// Scoped to `.dropdown-toggle`'s own menus only: other components on
-		// the page (e.g. the pipeline tab bar's "Actions" kebab) use the
-		// same `.dropdown-menu` class name for an unrelated dropdown, and
-		// this handler used to blindly hide every `.dropdown-menu` on the
-		// page — closing those unrelated menus too on any click, anywhere,
-		// including clicks that were opening them in the first place.
+		kanbanToggles.off("click.dropdown");
+		$(document).off(closeNamespace);
+
 		var kanbanMenus = function () {
-			return $(".dropdown-toggle").next(".dropdown-menu");
+			return kanbanRoot.find(".dropdown-toggle").next(".dropdown-menu");
 		};
 
-		$(".dropdown-toggle").on("click.dropdown", function (event) {
+		kanbanToggles.on("click.dropdown", function (event) {
 			event.stopPropagation();
 
 			const dropdownMenu = $(this).next(".dropdown-menu");
@@ -177,11 +207,12 @@
 			}
 		});
 
-		$(document).on("click.dropdown", function () {
+		$(document).on(closeNamespace, function () {
 			kanbanMenus().addClass("hidden");
 		});
 	});
 
+    {% if view.records_count_in_tab %}
     var tabId = $("#{{view_id}}").closest(".oh-tabs__content:visible").attr("id");
     var badge = $(`#badge-${tabId}`);
     var count = "{{grouped_items.items|length}}";
@@ -189,6 +220,7 @@
     var title = count + " " + label;
     badge.html(count);
     badge.attr("title", title);
+    {% endif %}
 
 	var toggleFold = (el) => {
 		el.closest(".kanban-block").toggleClass("folded");

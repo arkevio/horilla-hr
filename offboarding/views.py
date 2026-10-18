@@ -1,14 +1,19 @@
 import json
+import logging
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 from django.apps import apps
 from django.contrib import messages
+from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
+from django.db import transaction
+from django.db.utils import IntegrityError
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 
 from base.context_processors import intial_notice_period
 from base.methods import closest_numbers, eval_validate, paginator_qry, sortby
@@ -62,6 +67,8 @@ from offboarding.models import (
     OffboardingTask,
     ResignationLetter,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def any_manager(employee: Employee):
@@ -242,11 +249,7 @@ def create_offboarding(request):
             notify.send(
                 request.user.employee_get,
                 recipient=users,
-                verb="You are chosen as an offboarding manager",
-                verb_ar="لقد تم اختيارك كمدير عملية المغادرة",
-                verb_de="Sie wurden als Offboarding-Manager ausgewählt",
-                verb_es="Has sido elegido como gerente de offboarding",
-                verb_fr="Vous avez été choisi comme responsable du processus de départ",
+                verb=gettext_noop("You are chosen as an offboarding manager"),
                 icon="people-circle",
                 redirect=reverse("offboarding-pipeline"),
             )
@@ -303,11 +306,7 @@ def create_stage(request):
             notify.send(
                 request.user.employee_get,
                 recipient=users,
-                verb="You are chosen as offboarding stage manager",
-                verb_ar="لقد تم اختيارك كمدير لمرحلة عملية المغادرة",
-                verb_de="Sie wurden als Manager der Offboarding-Phase ausgewählt",
-                verb_es="Has sido elegido como gerente de la etapa de offboarding",
-                verb_fr="Vous avez été choisi comme responsable de l'étape de départ",
+                verb=gettext_noop("You are chosen as offboarding stage manager"),
                 icon="people-circle",
                 redirect=reverse("offboarding-pipeline"),
             )
@@ -384,11 +383,13 @@ def add_employee(request):
                 notify.send(
                     request.user.employee_get,
                     recipient=instance.employee_id.employee_user_id,
-                    verb=f"You have been added to the {stage} of {stage.offboarding_id}",
-                    verb_ar=f"لقد تمت إضافتك إلى {stage} من {stage.offboarding_id}",
-                    verb_de=f"Du wurdest zu {stage} von {stage.offboarding_id} hinzugefügt",
-                    verb_es=f"Has sido añadido a {stage} de {stage.offboarding_id}",
-                    verb_fr=f"Vous avez été ajouté à {stage} de {stage.offboarding_id}",
+                    verb=gettext_noop(
+                        "You have been added to the %(stage)s of %(offboarding_id)s"
+                    ),
+                    verb_params={
+                        "stage": str(stage),
+                        "offboarding_id": str(stage.offboarding_id),
+                    },
                     redirect=reverse("offboarding-pipeline"),
                     icon="information",
                 )
@@ -413,11 +414,7 @@ def delete_employee(request):
             recipient=HorillaUser.objects.filter(
                 id__in=instances.values_list("employee_id__employee_user_id", flat=True)
             ),
-            verb=f"You have been removed from the offboarding",
-            verb_ar=f"لقد تمت إزالتك من إنهاء الخدمة",
-            verb_de=f"Du wurdest aus dem Offboarding entfernt",
-            verb_es=f"Has sido eliminado del offboarding",
-            verb_fr=f"Vous avez été retiré de l'offboarding",
+            verb=gettext_noop("You have been removed from the offboarding"),
             redirect=reverse("offboarding-pipeline"),
             icon="information",
         )
@@ -493,9 +490,13 @@ def change_stage(request):
     This method is used to update the stages of the employee
     """
     employee_ids = request.GET.getlist("employee_ids")
-    stage_id = request.GET["stage_id"]
+    stage_id = request.GET.get("stage_id")
+    if not stage_id:
+        return HttpResponse()
     employees = OffboardingEmployee.objects.filter(id__in=employee_ids)
-    stage = OffboardingStage.objects.get(id=stage_id)
+    stage = OffboardingStage.objects.filter(id=stage_id).first()
+    if not stage:
+        return HttpResponse()
 
     blocked_message = _blocked_required_tasks_message(employees, stage)
     if blocked_message:
@@ -526,10 +527,25 @@ def change_stage(request):
 
     target_state = False if stage.type == "archived" else True
     employee_ids = employees.values_list("employee_id__id", flat=True)
-    Employee.objects.filter(
-        id__in=employee_ids,
-        is_active=not target_state,  # Only update if is_active differs
-    ).update(is_active=target_state)
+    # Saved one at a time rather than through a queryset update(), because
+    # update() skips save() and therefore sync_login_access(). Authentication
+    # reads HorillaUser.is_active, not Employee.is_active, so updating in bulk
+    # archived the employee record while leaving the person's login working --
+    # and the API issues 30-day refresh tokens, so a leaver kept API access for
+    # up to a month. Syncing both directions also means moving someone back out
+    # of the archived stage restores their access.
+    # Atomic because this is now several statements where it used to be one:
+    # Employee.save() runs full_clean(), so one legacy row that no longer
+    # validates would otherwise abort the batch half-applied, leaving some
+    # people archived and others not.
+    with transaction.atomic():
+        for employee_record in Employee.objects.filter(
+            id__in=employee_ids,
+            is_active=not target_state,  # Only touch rows whose state differs
+        ):
+            employee_record.is_active = target_state
+            employee_record.save()
+            employee_record.sync_login_access()
 
     stage_forms = {}
     stage_forms[str(stage.offboarding_id.id)] = StageSelectForm(
@@ -540,11 +556,7 @@ def change_stage(request):
         recipient=HorillaUser.objects.filter(
             id__in=employees.values_list("employee_id__employee_user_id", flat=True)
         ),
-        verb=f"Offboarding stage has been changed",
-        verb_ar=f"تم تغيير مرحلة إنهاء الخدمة",
-        verb_de=f"Die Offboarding-Stufe wurde geändert",
-        verb_es=f"Se ha cambiado la etapa de offboarding",
-        verb_fr=f"L'étape d'offboarding a été changée",
+        verb=gettext_noop("Offboarding stage has been changed"),
         redirect=reverse("offboarding-pipeline"),
         icon="information",
     )
@@ -571,9 +583,13 @@ def change_offboarding_stage(request):
     This method is used to update the stages of the employee
     """
     employee_ids = request.GET.getlist("employee_ids")
-    stage_id = request.GET["stage_id"]
+    stage_id = request.GET.get("stage_id")
+    if not stage_id:
+        return HttpResponse()
     employees = OffboardingEmployee.objects.filter(id__in=employee_ids)
-    stage = OffboardingStage.objects.get(id=stage_id)
+    stage = OffboardingStage.objects.filter(id=stage_id).first()
+    if not stage:
+        return HttpResponse()
 
     blocked_message = _blocked_required_tasks_message(employees, stage)
     if blocked_message:
@@ -592,9 +608,16 @@ def change_offboarding_stage(request):
         employee.stage_id = stage
         employee.save()
     if stage.type == "archived":
-        Employee.objects.filter(
-            id__in=employees.values_list("employee_id__id", flat=True)
-        ).update(is_active=False)
+        # Same reason as in change_stage: update() would skip save(), and with
+        # it sync_login_access(), leaving the leaver's login enabled.
+        with transaction.atomic():
+            for leaver in Employee.objects.filter(
+                id__in=employees.values_list("employee_id__id", flat=True),
+                is_active=True,
+            ):
+                leaver.is_active = False
+                leaver.save()
+                leaver.sync_login_access()
     stage_forms = {}
     stage_forms[str(stage.offboarding_id.id)] = StageSelectForm(
         offboarding=stage.offboarding_id
@@ -604,11 +627,7 @@ def change_offboarding_stage(request):
         recipient=HorillaUser.objects.filter(
             id__in=employees.values_list("employee_id__employee_user_id", flat=True)
         ),
-        verb=f"Offboarding stage has been changed",
-        verb_ar=f"تم تغيير مرحلة إنهاء الخدمة",
-        verb_de=f"Die Offboarding-Stufe wurde geändert",
-        verb_es=f"Se ha cambiado la etapa de offboarding",
-        verb_fr=f"L'étape d'offboarding a été changée",
+        verb=gettext_noop("Offboarding stage has been changed"),
         redirect=reverse("offboarding-pipeline"),
         icon="information",
     )
@@ -641,7 +660,9 @@ def view_notes(request, employee_id=None):
             attachments.append(attachment)
         note.attachments.add(*attachments)
     offboarding_employee_id = employee_id
-    employee = OffboardingEmployee.objects.get(id=offboarding_employee_id)
+    employee = OffboardingEmployee.objects.filter(id=offboarding_employee_id).first()
+    if not employee:
+        return HttpResponse()
 
     return render(
         request,
@@ -778,11 +799,7 @@ def update_task_status(request, *args, **kwargs):
                 "task_id__managers__employee_user_id", flat=True
             )
         ),
-        verb=f"Offboarding Task status has been updated",
-        verb_ar=f"تم تحديث حالة مهمة إنهاء الخدمة",
-        verb_de=f"Der Status der Offboarding-Aufgabe wurde aktualisiert",
-        verb_es=f"Se ha actualizado el estado de la tarea de offboarding",
-        verb_fr=f"Le statut de la tâche d'offboarding a été mis à jour",
+        verb=gettext_noop("Offboarding Task status has been updated"),
         redirect=reverse("offboarding-pipeline"),
         icon="information",
     )
@@ -819,14 +836,28 @@ def task_assign(request):
     task = OffboardingTask.find(task_id)
     if not task:
         return HorillaRedirect(request, message=_("Task not found"))
+    failed = []
     for employee in employees:
         try:
             assigned_task = EmployeeTask()
             assigned_task.employee_id = employee
             assigned_task.task_id = task
             assigned_task.save()
-        except:
-            pass
+        except (IntegrityError, ValidationError) as error:
+            # The employee already has this task, or the row fails model
+            # validation. Skipping that employee is right, but this was a
+            # bare except inside the loop, so every other failure was also
+            # silent and the caller still saw a success page.
+            failed.append(employee)
+            logger.warning(
+                "task %s not assigned to %s: %s", task.pk, employee.pk, error
+            )
+    if failed:
+        messages.warning(
+            request,
+            _("Task could not be assigned to %(count)s employee(s).")
+            % {"count": len(failed)},
+        )
     offboarding = employees.first().stage_id.offboarding_id
     stage_forms = {}
     stage_forms[str(offboarding.id)] = StageSelectForm(offboarding=offboarding)
@@ -947,12 +978,20 @@ def request_single_view(request, id):
 
 
 @login_required
-@hx_request_required
 @check_feature_enabled("resignation_request")
 def search_resignation_request(request):
     """
     This method is used to search/filter the letter
     """
+    # This endpoint returns only the list/filter fragment; a genuine
+    # top-level browser navigation/reload should land on the real
+    # Resignation Requests page instead of showing the raw fragment.
+    if request.headers.get("Sec-Fetch-Mode") == "navigate":
+        redirect_url = reverse("resignation-request-view")
+        query_string = request.GET.urlencode()
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return redirect(redirect_url)
     if request.user.has_perm("offboarding.view_resignationletter"):
         letters = LetterFilter(request.GET).qs
     else:
@@ -1206,11 +1245,10 @@ def update_status(request):
             notify.send(
                 request.user.employee_get,
                 recipient=letter.employee_id.employee_user_id,
-                verb=f"Resignation request has been {letter.get_status_display()}",
-                verb_ar=f"تم {letter.get_status_display()} طلب الاستقالة",
-                verb_de=f"Der Rücktrittsantrag wurde {letter.get_status_display()}",
-                verb_es=f"La solicitud de renuncia ha sido {letter.get_status_display()}",
-                verb_fr=f"La demande de démission a été {letter.get_status_display()}",
+                verb=gettext_noop(
+                    "Resignation request has been %(get_status_display)s"
+                ),
+                verb_params={"get_status_display": str(letter.get_status_display())},
                 redirect="#",
                 icon="information",
             )
@@ -1452,40 +1490,6 @@ if apps.is_installed("pms"):
             "offboarding/dashboard/employee_feedback_table.html",
             {"feedbacks": feedbacks},
         )
-
-
-@login_required
-@any_manager_can_enter("offboarding.view_offboarding")
-def dashboard_join_chart(request):
-    """
-    This method is used to render the joining - offboarding chart.
-    """
-
-    employees = Employee.objects.entire()
-    offboarding_employees = OffboardingEmployee.objects.entire()
-    archived_employees = offboarding_employees.filter(stage_id__type="archived")
-    resigning_employees = employees.filter(resignationletter__isnull=False).exclude(
-        offboardingemployee__stage_id__type="archived"
-    )
-
-    labels = ["resigning", "archived"]
-    items = [
-        resigning_employees.count(),
-        archived_employees.count(),
-    ]
-    if apps.is_installed("recruitment"):
-        Candidate = get_horilla_model_class(app_label="recruitment", model="candidate")
-        onboarding_employees = Candidate.objects.filter(
-            onboarding_stage__isnull=False, converted_employee_id__isnull=True
-        )
-        labels.append("New")
-        items.append(onboarding_employees.count())
-
-    response = {
-        "labels": labels,
-        "items": items,
-    }
-    return JsonResponse(response)
 
 
 @login_required

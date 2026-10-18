@@ -30,7 +30,7 @@ from base.forms import AttendanceAllowedIPForm
 from base.models import AttendanceAllowedIP
 from base.views import add_remove_dynamic_fields
 
-from .views import summary, views
+from .views import regularisation_import, summary, views
 
 urlpatterns = [
     path(
@@ -84,11 +84,6 @@ urlpatterns = [
         name="attendances-tab-view",
     ),
     path(
-        "attendances-navbar-view/",
-        attendances.AttendancesNavView.as_view(),
-        name="attendances-navbar-view",
-    ),
-    path(
         "attendences-navbar-export/",
         attendances.AttendancesExportNav.as_view(),
         name="attendences-navbar-export",
@@ -97,6 +92,16 @@ urlpatterns = [
         "validate-attendance-tab/",
         attendances.ValidateAttendancesList.as_view(),
         name="validate-attendance-tab",
+    ),
+    path(
+        "validate-attendance-tab-shell/",
+        attendances.ValidateAttendanceTabShell.as_view(),
+        name="validate-attendance-tab-shell",
+    ),
+    path(
+        "validate-attendance-nav/",
+        attendances.ValidateAttendanceNav.as_view(),
+        name="validate-attendance-nav",
     ),
     path(
         "validate-attendance-individual-tab/<int:pk>/",
@@ -109,9 +114,29 @@ urlpatterns = [
         name="ot-attendance-tab",
     ),
     path(
+        "ot-attendance-tab-shell/",
+        attendances.OTAttendanceTabShell.as_view(),
+        name="ot-attendance-tab-shell",
+    ),
+    path(
+        "ot-attendance-nav/",
+        attendances.OTAttendanceNav.as_view(),
+        name="ot-attendance-nav",
+    ),
+    path(
         "validated-attendance-tab/",
         attendances.ValidatedAttendancesList.as_view(),
         name="validated-attendance-tab",
+    ),
+    path(
+        "validated-attendance-tab-shell/",
+        attendances.ValidatedAttendanceTabShell.as_view(),
+        name="validated-attendance-tab-shell",
+    ),
+    path(
+        "validated-attendance-nav/",
+        attendances.ValidatedAttendanceNav.as_view(),
+        name="validated-attendance-nav",
     ),
     path(
         "validate-detail-view/<int:pk>/",
@@ -887,9 +912,29 @@ urlpatterns = [
         name="attendance-request-list-tab",
     ),
     path(
+        "requested-attendance-tab-shell/",
+        attendance_request.RequestedAttendanceTabShell.as_view(),
+        name="requested-attendance-tab-shell",
+    ),
+    path(
+        "requested-attendance-nav/",
+        attendance_request.RequestedAttendanceNav.as_view(),
+        name="requested-attendance-nav",
+    ),
+    path(
         "attendance-request-individual-tab/<int:pk>/",
         attendance_tab.RequestedAttendanceIndividualView.as_view(),
         name="attendance-request-individual-tab",
+    ),
+    path(
+        "attendance-request-individual-tab-shell/<int:pk>/",
+        attendance_tab.RequestedAttendanceIndividualTabShell.as_view(),
+        name="attendance-request-individual-tab-shell",
+    ),
+    path(
+        "attendance-request-individual-tab-nav/<int:pk>/",
+        attendance_tab.RequestedAttendanceIndividualNav.as_view(),
+        name="attendance-request-individual-tab-nav",
     ),
     path(
         "attendance-list-tab/",
@@ -897,9 +942,14 @@ urlpatterns = [
         name="attendance-list-tab",
     ),
     path(
-        "attendance-request-nav/",
-        attendance_request.AttendanceRequestNav.as_view(),
-        name="attendance-request-nav",
+        "all-attendance-tab-shell/",
+        attendance_request.AllAttendanceTabShell.as_view(),
+        name="all-attendance-tab-shell",
+    ),
+    path(
+        "all-attendance-request-nav/",
+        attendance_request.AllAttendanceRequestNav.as_view(),
+        name="all-attendance-request-nav",
     ),
     path(
         "attendances-tab-detail-view/<int:pk>/",
@@ -956,16 +1006,6 @@ urlpatterns = [
         name="attendance-dashboard-kpi",
     ),
     path(
-        "dashboard/api/weekly/",
-        att_dashboard.attendance_weekly_trend,
-        name="attendance-dashboard-weekly",
-    ),
-    path(
-        "dashboard/api/departments/",
-        att_dashboard.attendance_department_breakdown,
-        name="attendance-dashboard-dept",
-    ),
-    path(
         "dashboard/api/late-early/",
         att_dashboard.attendance_late_early_data,
         name="attendance-dashboard-late-early",
@@ -981,19 +1021,14 @@ urlpatterns = [
         name="attendance-dashboard-hours",
     ),
     path(
-        "dashboard/api/shifts/",
-        att_dashboard.attendance_shift_distribution,
-        name="attendance-dashboard-shifts",
+        "dashboard/api/attendance-percentage/",
+        att_dashboard.attendance_percentage_by_dimension,
+        name="attendance-dashboard-percentage",
     ),
     path(
-        "dashboard/api/absenteeism/",
-        att_dashboard.attendance_absenteeism_trend,
-        name="attendance-dashboard-absenteeism",
-    ),
-    path(
-        "dashboard/api/work-types/",
-        att_dashboard.attendance_work_type_distribution,
-        name="attendance-dashboard-work-types",
+        "dashboard/api/absence-percentage/",
+        att_dashboard.absence_percentage_by_dimension,
+        name="attendance-dashboard-absence-percentage",
     ),
     path(
         "dashboard/api/avg-hours/",
@@ -1004,11 +1039,6 @@ urlpatterns = [
         "dashboard/api/top-absentees/",
         att_dashboard.attendance_top_absentees,
         name="attendance-dashboard-absentees",
-    ),
-    path(
-        "dashboard/api/clockin-dist/",
-        att_dashboard.attendance_clockin_distribution,
-        name="attendance-dashboard-clockin",
     ),
     path(
         "dashboard/api/calendar/",
@@ -1050,6 +1080,33 @@ urlpatterns = [
         "monthly-summary/conflict-resolve/",
         summary.attendance_monthly_summary_conflict_resolve,
         name="attendance-monthly-summary-conflict-resolve",
+    ),
+    # Ctrl/Shift-click a range of calendar day cells, then apply one status
+    # to all of them at once — the in-context sibling of the spreadsheet-based
+    # bulk regularisation above, for when the days are all visible together
+    # on one employee's calendar rather than scattered across the summary.
+    path(
+        "monthly-summary/conflict-bulk-resolve/",
+        summary.attendance_monthly_summary_conflict_bulk_resolve,
+        name="attendance-monthly-summary-conflict-bulk-resolve",
+    ),
+    # Bulk regularisation by spreadsheet: download the days awaiting a
+    # decision, fill one column, upload. See regularisation_import for why the
+    # template is pre-filled rather than empty.
+    path(
+        "monthly-summary/regularisation-template/",
+        regularisation_import.regularisation_template,
+        name="attendance-regularisation-template",
+    ),
+    path(
+        "monthly-summary/regularisation-import/",
+        regularisation_import.regularisation_import,
+        name="attendance-regularisation-import",
+    ),
+    path(
+        "monthly-summary/regularisation-confirm/",
+        regularisation_import.regularisation_confirm,
+        name="attendance-regularisation-confirm",
     ),
     path(
         "monthly-summary/bulk-override/",

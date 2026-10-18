@@ -44,12 +44,6 @@
   -webkit-font-smoothing: antialiased;
 }
 
-.animated-background {
-  background-color: #f6f7f8;
-  height: 300px;
-  position: relative;
-}
-
 .oh-modal {
   position: fixed;
   background-color: rgba(28.05, 28.05, 28.05, 0.2);
@@ -426,6 +420,28 @@ input[type="file"] {
 
 .blue--dot {
   background-color: rgb(103, 171, 238);
+}
+
+.hired--dot {
+  background-color: green;
+}
+
+.cancelled--dot,
+.canceled--dot {
+  background-color: red;
+}
+
+.interview--dot {
+  background-color: rgb(103, 171, 238);
+}
+
+.test--dot {
+  background-color: orange;
+}
+
+.initial--dot,
+.applied--dot {
+  background-color: gray;
 }
 
 .row {
@@ -1464,11 +1480,7 @@ table .oh-btn-group a {
   background-color: hsl(0, 0%, 95%) !important;
 }
 
-/* .oh-btn--light-bkg forces a near-white background; color modifiers like
-   .oh-btn--danger/.oh-btn--success/.oh-btn--secondary set the icon color to
-   white (assuming a solid background). Combined, the icon becomes invisible
-   (white-on-white). When both are used together, keep the light background
-   but tint the icon with the modifier's color instead of white. */
+/* avoid white-on-white icon */
 .oh-btn--light-bkg.oh-btn--danger {
   color: hsl(1, 100%, 61%) !important;
 }
@@ -1497,6 +1509,7 @@ table .oh-btn-group a {
 .oh-btn--disabled {
   opacity: 0.5;
   cursor: not-allowed !important;
+  pointer-events: none;
 }
 
 .oh-btn--disabled:focus,
@@ -1543,6 +1556,9 @@ table .oh-btn-group a {
   content: "";
   width: 22px;
   height: 22px;
+  background-position: center;
+  background-size: contain;
+  background-repeat: no-repeat;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' width='18' height='18'%3E%3Cpath fill='none' d='M0 0h24v24H0z'%3E%3C/path%3E%3Cpath d='M14.8287 7.75737L9.1718 13.4142C8.78127 13.8047 8.78127 14.4379 9.1718 14.8284C9.56232 15.219 10.1955 15.219 10.586 14.8284L16.2429 9.17158C17.4144 8.00001 17.4144 6.10052 16.2429 4.92894C15.0713 3.75737 13.1718 3.75737 12.0002 4.92894L6.34337 10.5858C4.39075 12.5384 4.39075 15.7042 6.34337 17.6569C8.29599 19.6095 11.4618 19.6095 13.4144 17.6569L19.0713 12L20.4855 13.4142L14.8287 19.0711C12.095 21.8047 7.66283 21.8047 4.92916 19.0711C2.19549 16.3374 2.19549 11.9053 4.92916 9.17158L10.586 3.51473C12.5386 1.56211 15.7045 1.56211 17.6571 3.51473C19.6097 5.46735 19.6097 8.63317 17.6571 10.5858L12.0002 16.2427C10.8287 17.4142 8.92916 17.4142 7.75759 16.2427C6.58601 15.0711 6.58601 13.1716 7.75759 12L13.4144 6.34316L14.8287 7.75737Z' fill='rgba(169,169,169,1)'%3E%3C/path%3E%3C/svg%3E");
 }
 
@@ -1701,6 +1717,11 @@ table .oh-btn-group a {
   align-items: center;
 }
 
+td .oh-profile {
+  max-width: 100%;
+  overflow: hidden;
+}
+
 .oh-profile__avatar {
   border-radius: 50%;
   flex-shrink: 0;
@@ -1729,6 +1750,32 @@ table .oh-btn-group a {
   object-position: center;
 }
 
+.oh-timeoff-modal__download-link {
+  width: fit-content;
+  background: hsl(213, 22%, 93%);
+  padding: 0.5rem 1rem;
+  margin-top: 1.25rem;
+  border-radius: 0.375rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.9rem;
+  color: hsl(0, 0%, 27%);
+}
+
+.oh-timeoff-modal__download-link ion-icon {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.oh-timeoff-modal__download-link:hover,
+.oh-timeoff-modal__download-link:focus,
+.oh-timeoff-modal__download-link:focus-visible {
+  text-decoration: none;
+  background-color: hsl(213, 22%, 84%);
+}
+
 .oh-history_user-img {
   width: 40px;
   height: 40px;
@@ -1743,13 +1790,13 @@ table .oh-btn-group a {
 }
 
 .oh-view-btn--active {
-  background-color: var(--primary-600, #E54F38) !important;
+  background-color: #fff !important;
   border: 1px solid var(--primary-600, #E54F38) !important;
-  color: #fff !important;
+  color: var(--primary-600, #E54F38) !important;
 }
 
 .oh-view-btn--active ion-icon {
-  color: #fff;
+  color: var(--primary-600, #E54F38);
 }
 
 .swal2-styled.swal2-confirm {
@@ -1760,14 +1807,6 @@ table .oh-btn-group a {
   background-color: rgb(221, 51, 51);
 }
 
-/* Stacked accordions in a filter dropdown (Work Info / Work Type Request /
-   Advanced / Group By, etc.) only get a gap between each other from the
-   wrapper's Tailwind "space-y-2" utility class - since these dropdowns are
-   injected via htmx after the initial page load, that class can briefly
-   render unstyled before the Tailwind CDN Play compiler rescans the DOM
-   (see .oh-filter-dropdown further down for the same issue on the outer
-   padding). Pinning the gap here, on the plain (non-Tailwind) .oh-accordion class,
-   guarantees it regardless of that timing. */
 .oh-accordion + .oh-accordion {
   margin-top: 0.5rem;
 }
@@ -1850,9 +1889,7 @@ table .oh-btn-group a {
   transform: rotate(180deg);
 }
 
-/* Nested HLV tables inside category/accordion panels must not use the
-   full-viewport max-height — that inflated the panel and left a large empty
-   band around the pagination toolbar. */
+/* avoid empty gap above pagination */
 .accordion-panel .heightContainer,
 .accordion-panel .hlv-container .heightContainer {
   max-height: 300px !important;
@@ -1862,23 +1899,20 @@ table .oh-btn-group a {
   padding-top: 0.25rem;
 }
 
-/* Compact, vertically centered list pagination control. Like
-   .oh-filter-dropdown below, this is loaded via htmx after the initial page
-   load (every sub-tab except the first one eager-loaded on ready), so its
-   Tailwind CDN utility classes can briefly render unstyled until the Play
-   CDN's JIT compiler rescans the DOM. Pinning the layout/appearance here, in
-   the plain stylesheet loaded upfront on every page, avoids that flash. */
+/* htmx-loaded */
 .hlv-pagination {
   display: inline-flex;
   align-items: center;
   height: 2rem;
   gap: 0.125rem;
   background-color: #fff;
-  border: 1px solid #e6e6e6;
   border-radius: 0.375rem;
   padding: 0 0.25rem;
   flex-shrink: 0;
   line-height: 1;
+  /* Border color comes from the template's own border-primary-500 utility
+     class (matches the Actions button's border) - this file loads after
+     tailwind.css, so a border set here would always beat that utility. */
 }
 
 .hlv-pagination button {
@@ -1923,6 +1957,15 @@ table .oh-btn-group a {
   box-sizing: border-box;
 }
 
+/* This file loads after tailwind.css, so its plain, always-on border above
+   wins the cascade over that file's `.focus\:border-primary-600:focus`
+   utility even at :focus (same specificity, later source order) - the
+   input just never visibly changed color on click. Restated here, after
+   the base rule, so the themed color actually wins when focused. */
+.hlv-pagination input[type="number"]:focus {
+  border-color: var(--primary-600, #E54F38);
+}
+
 .hlv-pagination span {
   display: inline-flex;
   align-items: center;
@@ -1931,12 +1974,7 @@ table .oh-btn-group a {
   white-space: nowrap;
 }
 
-/* The "Filter" dropdown (nav bars + attendance work record view) is loaded
-   via htmx into the page after the initial load, so its Tailwind CDN
-   utility classes (min-w-[400px] p-3) can briefly render unstyled until the
-   Play CDN's JIT compiler rescans the DOM. Pinning padding/min-width here,
-   in the plain stylesheet loaded upfront on every page, keeps this
-   consistent across every filter form regardless of that timing. */
+/* htmx-loaded */
 .oh-filter-dropdown {
   min-width: 400px;
   padding: 0.75rem;
@@ -2368,32 +2406,6 @@ table .oh-btn-group a {
   font-size: 0.875rem;
 }
 
-/* @media (max-width: 767.98px) {
-    .oh-main__titlebar-button-container .oh-btn-group.ml-2 {
-      margin-left: 0 !important;
-    }
-    .oh-view-types.ml-2 {
-      margin-left: 0;
-      margin-right: 10px;
-    }
-    .oh-btn-group.ml-2:last-child {
-      margin-left: 0 !important;
-    }
-    .oh-main__titlebar-button-container {
-      margin-top: 0 !important;
-    }
-    .oh-main__titlebar--right {
-      width: unset;
-    }
-    .oh-dropdown__filter {
-      z-index: 9999;
-      left: 50%;
-      position: fixed;
-      width: 80%;
-      transform: translateX(-50%);
-    }
-  } */
-
 @media (max-width: 575.98px) {
   .oh-tabs__movable-title {
     font-size: 1rem;
@@ -2425,31 +2437,40 @@ table .oh-btn-group a {
 
 ul.errorlist {
   color: #d9534f;
-  background-color: #f0d8d8;
-  border: 1px solid #d6e9c6;
-  font-size: 0.875rem;
-  list-style-type: disc;
-  padding: 1rem 1rem 1rem 2rem;
-  border-radius: 4px;
-  margin: 12px 0;
+  background-color: transparent;
+  border: none;
+  font-size: 0.75rem;
+  font-weight: 500;
+  list-style-type: none;
+  padding: 0;
+  margin: 4px 0 0;
+  line-height: 1.3;
+}
+
+/* .oh-input/.oh-select carry their own margin-bottom for spacing to the
+   next field when there's no error. When an errorlist follows directly,
+   that margin stacks with the errorlist's own margin-top, pushing the
+   error message down further than fields whose widget doesn't carry that
+   margin (e.g. a select2 container) - drop it so the gap is consistent. */
+.oh-input:has(+ ul.errorlist),
+.oh-select:has(+ ul.errorlist) {
+  margin-bottom: 0;
+  /* Inputs/textareas are inline-block by default, which leaves baseline
+     descender space below them that reads as extra gap once the
+     margin-bottom above is removed. */
+  display: block;
 }
 
 ul.errorlist li {
-  margin-bottom: 0.25rem;
-  padding-left: 0.25rem;
+  margin: 0;
+  padding: 0;
 }
 
 ul.errorlist ul.errorlist {
   list-style-type: none;
-  margin-left: 1rem;
-  margin-top: 0.25rem;
+  margin: 4px 0 0;
   padding: 0;
   border: none;
-}
-
-ul.errorlist ul.errorlist li {
-  margin-bottom: 0.125rem;
-  padding-left: 0;
 }
 
 .required-star::after {
@@ -2541,10 +2562,6 @@ ul.errorlist ul.errorlist li {
   font-size: 0.85rem;
 }
 
-/* Hover-open disabled: the submenu panel now opens only on click via
-   the `.sidebox-active` class (see sidebar.html's delegated click
-   handler and global.css). This prevents the panel from popping open
-   whenever the cursor grazes a sidebar icon. */
 /*
 .sideboxmain:hover .sidebox {
   opacity: 1;
@@ -2833,7 +2850,7 @@ ul.errorlist ul.errorlist li {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  border: 1px solid rgba(229.194, 79.4444, 56.406, 0.15);
+  border: 1px solid var(--primary-300, rgba(229.194, 79.4444, 56.406, 0.15));
   transition: background-color 0.3s ease-in-out;
 }
 
@@ -2843,7 +2860,7 @@ ul.errorlist ul.errorlist li {
 }
 
 .oh-titlebar__tag-close {
-  background-color: hsl(8, 77%, 56%);
+  background-color: var(--primary-600, hsl(8, 77%, 56%));
   color: hsl(0, 0%, 100%);
   width: 16px;
   height: 16px;
@@ -2858,7 +2875,7 @@ ul.errorlist ul.errorlist li {
 }
 
 .oh-titlebar__tag-close:hover {
-  background-color: hsl(8, 61%, 50%);
+  background-color: var(--primary-700, hsl(8, 61%, 50%));
 }
 
 .oh-titlebar__save {
@@ -2878,17 +2895,17 @@ ul.errorlist ul.errorlist li {
 }
 
 .oh-titlebar__tag.filter-field {
-  border: solid 1px #ff450033;
+  border: solid 1px var(--primary-300, #ff450033);
 }
 
 .oh-titlebar__tag--custom {
-  background-color: rgba(255, 68, 0, 0.543) !important;
+  background-color: var(--primary-600, rgba(255, 68, 0, 0.543)) !important;
   color: white;
   cursor: pointer;
 }
 
 .oh-titlebar__tag--custom:hover {
-  background-color: rgba(255, 68, 0, 0.75) !important;
+  background-color: var(--primary-700, rgba(255, 68, 0, 0.75)) !important;
   transition: background-color 0.3s ease-in-out;
 }
 
@@ -2939,6 +2956,11 @@ ul.errorlist ul.errorlist li {
 
 .oh-alert--animated {
   animation: slide-right-in-pop-animation 3.5s 0s ease-in-out forwards;
+  pointer-events: auto;
+}
+
+.oh-alert--animated:hover {
+  animation-play-state: paused;
 }
 
 @keyframes slide-right-in-pop-animation {
@@ -3056,31 +3078,129 @@ ul.errorlist ul.errorlist li {
   align-items: center;
   justify-content: center;
   width: 100%;
-  height: 100px;
-  border: 1px dashed hsl(213, 22%, 84%);
+  min-height: 6.5rem;
+  border: 2px dashed hsl(213, 22%, 80%);
+  border-radius: 0.5rem;
   padding: 1rem;
-  background: rgba(233.223, 236.7573, 241.077, 0.2);
+  background: #f9fafb;
+  text-align: center;
   cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s;
 }
 
-.oh-dropdown__import-label:hover {
-  background: rgba(233.223, 236.7573, 241.077, 0.4);
+.oh-dropdown__import-label:hover,
+.oh-dropdown__import-label.oh-import-drag {
+  border-color: var(--primary-600, #e54f38);
+  background: var(--primary-100, #fff5f1);
+}
+
+.oh-dropdown__import-label.oh-import-has-file {
+  border-style: solid;
+  border-color: var(--primary-600, #e54f38);
 }
 
 .oh-dropdown__import-form-icon {
-  font-size: 4rem;
-  color: rgba(28.05, 28.05, 28.05, 0.85);
+  font-size: 2.5rem;
+  color: var(--primary-600, #e54f38);
+  margin-bottom: 0.25rem;
 }
 
 .oh-dropdown__import-form-title {
-  font-size: 1rem;
-  font-weight: bold;
-  color: rgba(28.05, 28.05, 28.05, 0.85);
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #374151;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .oh-dropdown__import-form-text {
-  font-size: 0.85rem;
-  color: hsl(0, 0%, 45%);
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+/* The drop zone replaces the native file control; keep the input in the
+   form (so `required` and submission still work) but visually hidden. */
+.oh-dropdown__import-form input[type="file"],
+.oh-dropdown__import-label ~ input[type="file"],
+form input[type="file"].oh-import-input {
+  position: absolute;
+  width: 1px !important;
+  height: 1px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Import modals: same layout as the Employee import modal --
+   drop zone, outlined "Download Template" button on the left under it,
+   a divider, then a brand-coloured "Upload" button on the right. */
+form:has(.oh-dropdown__import-label) .float-end {
+  float: none !important;
+  display: flex !important;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  margin: 0.75rem 0 0 !important;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #e5e7eb;
+}
+
+form:has(.oh-dropdown__import-label) .float-end .oh-dropdown__link {
+  display: inline-flex !important;
+  width: auto !important;
+  height: auto !important;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--primary-600, #e54f38);
+  border-radius: 0.375rem;
+  color: var(--primary-600, #e54f38) !important;
+  font-size: 0.75rem;
+  text-decoration: none;
+  transition: background-color 0.3s, color 0.3s;
+}
+
+/* Informative hint beside the Download Template button */
+form:has(.oh-dropdown__import-label) .float-end::after {
+  content: "Fill in the template and upload it here.";
+  font-size: 0.75rem;
+  color: #6b7280;
+}
+
+form:has(.oh-dropdown__import-label) .float-end .oh-dropdown__link:hover {
+  background: var(--primary-800, #b3331f);
+  color: #fff !important;
+}
+
+form:has(.oh-dropdown__import-label) .float-end .oh-dropdown__link ion-icon {
+  font-size: 16px !important;
+}
+
+form:has(.oh-dropdown__import-label) :is(button[type="submit"], input[type="submit"]) {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: auto !important;
+  margin-left: auto;
+  margin-top: 1rem;
+  padding: 0.5rem 1.25rem;
+  border: 0;
+  border-radius: 0.375rem;
+  background: var(--primary-600, #e54f38);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 500;
+  transition: background-color 0.3s;
+}
+
+form:has(.oh-dropdown__import-label) :is(button[type="submit"], input[type="submit"]):hover {
+  background: var(--primary-800, #b3331f);
 }
 
 .oh-dropdown__menu--top-100 {
@@ -3111,7 +3231,7 @@ ul.errorlist ul.errorlist li {
 }
 
 .oh-dropdown__link:hover {
-  color: hsl(8, 77%, 56%) !important;
+  color: var(--primary-600, hsl(8, 77%, 56%)) !important;
   text-decoration: none !important;
 }
 
@@ -3441,9 +3561,9 @@ ul.errorlist ul.errorlist li {
 
 .oh-sticky-dropdown_btn.is-column-config-trigger:hover,
 .oh-sticky-dropdown_btn.is-column-config-trigger[aria-expanded="true"] {
-  color: #e54f38;
-  border-color: #f0c4bc;
-  background: #fff5f3;
+  color: var(--primary-600, #e54f38);
+  border-color: var(--primary-500, #f0c4bc);
+  background: var(--primary-100, #fff5f3);
 }
 
 .oh-sticky-dropdown_btn {
@@ -3662,6 +3782,7 @@ span.oh-activity-sidebar__a img {
   max-width: 300px;
   width: auto;
   position: absolute;
+  pointer-events: none;
 }
 
 .ui-helper-hidden-accessible {
@@ -3741,9 +3862,7 @@ span.oh-activity-sidebar__a img {
   align-items: center !important;
 }
 
-/* ===========================
-*         Employee Forms
-* ============================ */
+/* Employee Forms */
 .oh-main__org-chart-data {
   display: none;
 }
@@ -3887,9 +4006,7 @@ span.oh-activity-sidebar__a img {
   font-size: 1.5rem;
 }
 
-/* ==================================
-    *     Employee Form GENERAL TABS
-    * ================================= */
+/* General tabs */
 .oh-general__tabs {
   display: flex;
   flex-wrap: wrap;
@@ -3979,6 +4096,42 @@ span.oh-activity-sidebar__a img {
   .select2-selection
   .select2-selection__arrow {
   display: none !important;
+}
+
+/* Some locked-but-still-relevant fields (e.g. the loan employee on edit)
+   need to keep looking like a normal boxed select instead of the bare-text
+   treatment above, while staying HTML-disabled. Opt in per-field via this
+   class; specificity (two classes) beats the .oh-select:disabled rule above. */
+.oh-select.oh-select--boxed-locked:disabled + .select2-container .select2-selection {
+  /* Same tint as disabled .form-control inputs below, so a locked select
+     reads as read-only instead of looking clickable. */
+  background-color: #f7f7f7 !important;
+  border: 1px solid #e6e6e6 !important;
+  cursor: not-allowed;
+}
+
+.oh-select.oh-select--boxed-locked:disabled
+  + .select2-container
+  .select2-selection
+  .select2-selection__rendered {
+  color: #6b7280 !important;
+}
+
+.oh-select.oh-select--boxed-locked:disabled
+  + .select2-container
+  .select2-selection
+  .select2-selection__arrow {
+  display: block !important;
+}
+
+/* Disabled text/number/date inputs and textareas otherwise look identical
+   to editable ones in this theme - tint them so locked fields (e.g. loan
+   amount/installments once an installment is paid) read as read-only. */
+input.form-control:disabled,
+textarea.form-control:disabled {
+  background-color: #f7f7f7;
+  color: #6b7280;
+  cursor: not-allowed;
 }
 
 .select2-container--open .select2-selection {
@@ -4110,7 +4263,7 @@ input[type="range"]::-ms-fill-upper {
   position: relative;
 }
 
-/* Triangle opens a per-field "filter this field's values" popup. */
+/* per-field filter popup trigger */
 .pvtAxisContainer li span.pvtAttr .pvtTriangle {
   position: absolute;
   right: 8px;
@@ -4145,16 +4298,7 @@ input[type="range"]::-ms-fill-upper {
   table-layout: auto;
 }
 
-/* .pvtUi is a real <table> (the library's markup). Converted to CSS Grid so
-   each cell can be positioned explicitly and the 3 columns get independent,
-   controllable widths: `display:contents` on <tr> removes the row wrapper
-   from the box tree so its <td> children become direct grid items. Cells
-   still stretch to fill their grid row's height by default (same visual
-   effect as the original table), which is intentional -- see the note by
-   .pvtAxisContainer.pvtUnused below for why. This only changes visual
-   layout -- the DOM tree (and therefore the jQuery UI Sortable drag-and-
-   drop wiring, which only cares about element positions, not display mode)
-   is completely untouched. */
+/* grid layout for pvtUi table */
 .pvtUi {
   width: 100% !important;
   display: grid !important;
@@ -4181,13 +4325,7 @@ input[type="range"]::-ms-fill-upper {
   grid-row: 1;
 }
 
-/* align-self left at its default (stretch) here on purpose: with `start`,
-   the box shrinks to fit just its own field pills, which looked fine when
-   the pill list was long but left a jarring, abruptly-short white box with
-   a gray gap underneath whenever the field list was shorter than the
-   actual data table next to it. Stretching keeps the white background
-   filling the same height as the table, regardless of which one has more
-   content, so the layout never looks visually "cut off". */
+/* stretch matches table height */
 .pvtAxisContainer.pvtUnused {
   grid-column: 1;
   grid-row: 2;
@@ -4220,11 +4358,7 @@ input[type="range"]::-ms-fill-upper {
   margin-bottom: 4px !important;
 }
 
-/* The per-field value filter popup (opened via the ▾ triangle) previously
-   had flat, sharp-cornered, shadow-less styling that made it look like a
-   stray box sitting on the page rather than a floating overlay -- give it
-   the same elevated-card treatment (rounded corners, drop shadow) used by
-   modals/dropdowns elsewhere in the app. */
+/* card styling for overlay */
 .pvtFilterBox {
   padding: 16px;
   width: auto !important;
@@ -4264,17 +4398,7 @@ input[type="range"]::-ms-fill-upper {
   background-color: #f4f5f7;
 }
 
-/* Report pivot builder: make the drag-and-drop mechanics understandable.
-   The library gives every zone (available fields / rows / columns) the
-   same look with no labels or drag affordance, so people can't tell what
-   they're looking at or that the field pills can be dragged around.
-
-   The "drag fields..." hint itself is NOT a ::before on .pvtUi (the
-   <table> the library generates) -- a pseudo-element's content there
-   still participates in the table's own auto-layout width calculation
-   (specifically it was inflating the Available Fields column), so it's a
-   real, separate <p class="oh-report-drag-hint"> placed in the template
-   above #pivot-container instead, completely independent of the table. */
+/* separate <p>, not a pseudo-element */
 .oh-report-drag-hint {
   font-size: 13px;
   color: #6b7280;
@@ -4290,27 +4414,14 @@ input[type="range"]::-ms-fill-upper {
   padding-top: 26px !important;
 }
 
-/* Available Fields was taking up way more width than it needs (the table's
-   auto-layout was giving it several times the Rows column's width). A plain
-   `width` on the <td> doesn't stick because the table's auto-layout sizes
-   each column to its widest content in the column -- which turned out to
-   be the "Table" renderer <select> above it (native selects size to their
-   widest option, e.g. "Horizontal Stacked Bar Chart"), not the field pills.
-   Constrain the select too, and the field pills (li/span), so nothing in
-   the column forces it wider than intended. */
+/* fixed width, ignore content */
 .pvtUi select.pvtRenderer {
   width: 150px;
   max-width: 150px;
   min-width: 150px;
 }
 
-/* The field-picker select that appears next to aggregators needing a target
-   field (e.g. "Sum" of <field>) isn't covered by the Renderer/Aggregator
-   border-reset rule above, so the browser's native widget chrome (appearance:
-   auto) was overriding the shared border-radius/border-color and rendering
-   as a plain, square-cornered, unstyled box. Forcing appearance:none makes
-   the custom border actually take effect, matching the rest of the pivot
-   table's inputs. */
+/* reset native select chrome */
 .pvtUi select.pvtAttrDropdown {
   appearance: none;
   -webkit-appearance: none;
@@ -4322,23 +4433,12 @@ input[type="range"]::-ms-fill-upper {
   background-color: #fff;
 }
 
-/* Row/column sort-order toggles (cycle through key/asc/desc order) -- not
-   a control this app's reports need, and left as visual clutter next to
-   the aggregator box. */
 .pvtRowOrder,
 .pvtColOrder {
   display: none !important;
 }
 
-/* When there's no data, the library renders zero field pills, so these
-   columns have no content left to hold their width open -- without a
-   min-width the whole table collapses/reflows into a broken-looking mess.
-   A floor width keeps the layout stable whether it's full or empty.
-
-   Cap both Available Fields AND Rows at the same width -- different report
-   types have a different split of how many fields land in each (e.g. a
-   report with few Available Fields but many Row fields), and whichever one
-   has more fields otherwise balloons to fill the leftover table width. */
+/* min width when empty */
 .pvtAxisContainer.pvtUnused,
 .pvtAxisContainer.pvtRows {
   width: 1%;
@@ -4372,9 +4472,7 @@ input[type="range"]::-ms-fill-upper {
   box-sizing: border-box;
 }
 
-/* Visual split between the report builder controls (renderer/aggregator
-   pickers, Available Fields, Rows, Columns) on the left/top and the actual
-   report table on the right, so the two are easy to tell apart at a glance. */
+/* split builder vs table visually */
 .pvtUiCell {
   background-color: #fafbfc;
 }
@@ -4384,13 +4482,7 @@ input[type="range"]::-ms-fill-upper {
   border-right: 2px solid #9aa1ab !important;
 }
 
-/* The actual report table gets its own darker, fully-enclosing border, PLUS
-   a light tinted background behind it (with real padding -- an earlier rule
-   set padding to 0, which would have hidden any tint) so the table reads as
-   its own clearly bordered, distinctly colored area rather than blending
-   into the same white background as the rest of the page. The table's own
-   cells stay white (set elsewhere) so the data itself stays crisp against
-   this tinted "frame". */
+/* bordered frame for report table */
 .pvtRendererArea {
   border: 2px solid #9aa1ab !important;
   background-color: #eef2f7;
@@ -4427,19 +4519,12 @@ input[type="range"]::-ms-fill-upper {
   content: "Rows";
 }
 
-/* Available Fields is an inert shelf, not part of the active report
-   configuration -- give it a visually "dimmer" pool look so it doesn't
-   read the same as the active Rows/Columns zones next to it. */
+/* dim inactive shelf */
 .pvtAxisContainer.pvtUnused {
   background-color: #fbfbfc;
 }
 
-/* Empty-state placeholder so an empty Rows/Columns zone reads as a real
-   drop target instead of unexplained blank space. Kept compact -- this sits
-   in the Columns zone, which is in the SAME table row as the "Table"
-   renderer select; a tall placeholder here stretches that whole row (table
-   rows share one height across all cells) and pushes Available Fields/Rows
-   down with an empty-looking gap above them. */
+/* placeholder for empty drop zone */
 .pvtAxisContainer.pvtRows:not(:has(li)),
 .pvtAxisContainer.pvtCols:not(:has(li)) {
   min-height: 24px;
@@ -4459,10 +4544,7 @@ input[type="range"]::-ms-fill-upper {
   padding: 6px 6px;
 }
 
-/* Drag handle: a 6-dot grip before each field's label, plus a grab cursor,
-   so fields visually announce that they can be dragged (the chevron next
-   to the label is a separate, unrelated "filter this field's values"
-   control, not a drag handle). */
+/* drag handle */
 .pvtAxisContainer li span.pvtAttr {
   cursor: grab;
   padding-left: 22px !important;
@@ -4678,7 +4760,7 @@ a,
   text-align: left !important;
 }
 
-/* Email text: ellipsize instead of clipping; tighter cap when many columns are enabled */
+/* ellipsize instead of clipping */
 .oh-mail-ellipsis {
   display: inline-block;
   max-width: 250px;
@@ -4691,9 +4773,7 @@ a,
   max-width: 160px;
 }
 
-/* Pipeline stage tables: size columns by cell content, not by heading width.
-   Headers may wrap; sparse columns may shrink below the default 85px floor;
-   body cells stay on one line so real content still defends its width. */
+/* size by content, not heading */
 .oh-tabs__movable-body .fixed-table thead th {
   min-width: unset !important;
   white-space: normal;
@@ -4701,29 +4781,181 @@ a,
 .oh-tabs__movable-body .fixed-table tbody td {
   white-space: nowrap;
 }
-/* Columns whose widgets (selects, star ratings) can't defend their own
-   width in content-based sizing get an explicit floor on the header cell */
-.oh-tabs__movable-body .fixed-table thead th[id$="-stage_drop_down-header"],
-.oh-tabs__movable-body .fixed-table thead th[id$="-rating_bar-header"] {
+/* floor width for narrow widgets */
+.oh-tabs__movable-body .fixed-table thead th[id$="stage_drop_down-header"],
+.oh-tabs__movable-body .fixed-table thead th[id$="rating_bar-header"] {
   min-width: 110px !important;
 }
-/* Email keeps a readable width regardless */
-th[id$="-mail_indication-header"] {
+th[id$="mail_indication-header"] {
   width: 280px;
   min-width: 250px !important;
 }
-.fixed-table:has(thead th:nth-child(7)) th[id$="-mail_indication-header"] {
+.fixed-table:has(thead th:nth-child(7)) th[id$="mail_indication-header"] {
   width: 210px;
   min-width: 170px !important;
 }
 
-/* Once Summernote has taken over a [data-summernote] textarea (its rich
-   .note-editor sibling exists), the raw source element must stay hidden.
-   Summernote's own JS hide step has been observed to silently no-op on a
-   form that's been closed and reopened more than once, leaving the raw
-   textarea visible side-by-side with the working rich editor. A CSS
-   !important rule wins over whatever inline display value that JS-timing
-   issue leaves behind, so this doesn't depend on init call order/timing. */
+.fixed-table thead th > div > .flex {
+  min-width: 0;
+}
+
+/* Summernote hide-bug workaround */
 textarea[data-summernote]:has(+ .note-editor) {
   display: none !important;
+}
+
+/* Write / Preview tab toggle (e.g. recruitment send-mail modal) */
+.oh-tabs__view-buttons {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  max-width: 260px;
+}
+.oh-tabs__view-buttons .tab-btn {
+  flex: 1 1 0%;
+  min-width: 0;
+  opacity: 0.6;
+}
+.oh-tabs__view-buttons .tab-btn.active {
+  opacity: 1;
+}
+.oh-tabs__view {
+  display: none;
+}
+.oh-tabs__view.active {
+  display: block;
+}
+
+/* Rendered mail-body preview pane (recruitment send-mail modal) */
+.oh-mail-preview {
+  min-height: 150px;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 1rem 1.25rem;
+  border: 1px solid #e6e6e6;
+  border-radius: 0.375rem;
+  background-color: white;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: hsl(0, 0%, 11%);
+}
+.oh-mail-preview :first-child {
+  margin-top: 0;
+}
+.oh-mail-preview :last-child {
+  margin-bottom: 0;
+}
+.oh-mail-preview img {
+  max-width: 100%;
+}
+
+/* Legacy titlebar (onboarding/onboarding_view_nav.html and similar pages
+   still on the old .oh-main__topbar layout): only the "-title" and other
+   sub-element rules survived into this theme's stylesheet, not the base
+   .oh-main__titlebar--right/.oh-view-types layout rules, so the search
+   box + view-type buttons + filter button stacked vertically instead of
+   in a row, inflating the topbar height and pushing all page content
+   down. Restored verbatim from the pre-theme stylesheet
+   (static/src/scss/main.css). */
+.oh-main__titlebar--right {
+  display: flex;
+  align-items: center;
+}
+.oh-view-types {
+  list-style-type: none;
+  padding-left: 0px;
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0px;
+}
+
+/* ---- "Dynamic create" entry of a select ----
+   Every form that lets a select create a new option (asset category, batch number,
+   ...) ends the list with a "dynamic_create" entry. It is an action, not a value, so
+   it is set apart from the real choices: a divider above, the theme colour, and a
+   plus badge, instead of reading like one more option. Select2 gives each result an
+   id ending in the option's value, which is what is matched. */
+.select2-results__option[id$="-dynamic_create"] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding: 9px 12px;
+  border-top: 1px dashed rgba(128, 128, 128, 0.35);
+  font-weight: 600;
+  color: var(--primary-600, #e54f38);
+  /* Pinned to the bottom of the dropdown, so it is in view without scrolling a
+     long list of real choices to find it. */
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: #fff;
+}
+
+.dark .select2-results__option[id$="-dynamic_create"] {
+  background: #242424;
+}
+
+.select2-results__option[id$="-dynamic_create"]::before {
+  content: "+";
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--primary-600, #e54f38);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.select2-container--default .select2-results__option--highlighted[id$="-dynamic_create"] {
+  background-color: var(--primary-600, #e54f38) !important;
+  color: #fff !important;
+}
+
+.select2-container--default .select2-results__option--highlighted[id$="-dynamic_create"]::before {
+  background: #fff;
+  color: var(--primary-600, #e54f38);
+}
+
+/* The plain <select> (no Select2): the same entry, as far as <option> can be styled. */
+option[value="dynamic_create"] {
+  font-weight: 600;
+  color: var(--primary-600, #e54f38);
+}
+
+/* Compact SweetAlert2 dialogs (confirmations, results, warnings). The library
+   defaults (32em wide, 5em icon, 1.875em title, large gaps) left a lot of empty
+   white space around a one-line message. Toasts are excluded; a Swal that sets
+   its own width/padding inline still wins. */
+.swal2-container .swal2-popup:not(.swal2-toast) {
+  width: 26rem;
+  padding: 0 0 1rem;
+}
+.swal2-popup:not(.swal2-toast) .swal2-icon {
+  font-size: 0.7rem;
+  margin: 1.1rem auto 0.4rem;
+}
+.swal2-popup:not(.swal2-toast) .swal2-title {
+  font-size: 1.1rem;
+  padding: 0.2rem 1rem 0;
+  margin: 0;
+}
+.swal2-popup:not(.swal2-toast) .swal2-html-container {
+  font-size: 0.9rem;
+  line-height: 1.4;
+  margin: 0.6rem 1.2rem 0;
+  padding: 0;
+}
+.swal2-popup:not(.swal2-toast) .swal2-actions {
+  margin: 1rem auto 0;
+}
+.swal2-popup:not(.swal2-toast) .swal2-styled {
+  padding: 0.45rem 1.2rem;
+  font-size: 0.85rem;
+  margin: 0 0.3rem;
 }

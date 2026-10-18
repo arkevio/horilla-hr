@@ -4,12 +4,12 @@ scheduler.py
 This module is used to register scheduled tasks
 """
 
-import sys
 from datetime import date, timedelta
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from django.urls import reverse
+from django.utils.translation import gettext_noop
 
+from horilla.scheduling import register_job
 from notifications.signals import notify
 
 
@@ -42,11 +42,13 @@ def notify_expiring_assets():
                 notify.send(
                     bot,
                     recipient=recipient,
-                    verb=f"The Asset '{asset.asset_name}' expires in {asset.notify_before} days",
-                    verb_ar=f"تنتهي صلاحية الأصل '{asset.asset_name}' خلال {asset.notify_before} من الأيام",
-                    verb_de=f"Das Asset {asset.asset_name} läuft in {asset.notify_before} Tagen ab.",
-                    verb_es=f"El activo {asset.asset_name} caduca en {asset.notify_before} días.",
-                    verb_fr=f"L'actif {asset.asset_name} expire dans {asset.notify_before} jours.",
+                    verb=gettext_noop(
+                        "The Asset '%(asset_name)s' expires in %(notify_before)s days"
+                    ),
+                    verb_params={
+                        "asset_name": str(asset.asset_name),
+                        "notify_before": str(asset.notify_before),
+                    },
                     redirect=reverse("asset-category-view"),
                     label="System",
                     icon="information",
@@ -88,16 +90,13 @@ def notify_expiring_documents():
                 notify.send(
                     bot,
                     recipient=document.employee_id.employee_user_id,
-                    verb=f"The document ' {document.title} ' expires in {document.notify_before}\
-                        days",
-                    verb_ar=f"تنتهي صلاحية المستند '{document.title}' خلال {document.notify_before}\
-                    يوم",
-                    verb_de=f"Das Dokument '{document.title}' läuft in {document.notify_before}\
-                        Tagen ab.",
-                    verb_es=f"El documento '{document.title}' caduca en {document.notify_before}\
-                        días",
-                    verb_fr=f"Le document '{document.title}' expire dans {document.notify_before}\
-                        jours",
+                    verb=gettext_noop(
+                        "The document ' %(title)s ' expires in %(notify_before)s days"
+                    ),
+                    verb_params={
+                        "title": str(document.title),
+                        "notify_before": str(document.notify_before),
+                    },
                     redirect=reverse("asset-category-view"),
                     label="System",
                     icon="information",
@@ -106,12 +105,6 @@ def notify_expiring_documents():
                 document.is_active = False
 
 
-if not any(
-    cmd in sys.argv
-    for cmd in ["makemigrations", "migrate", "compilemessages", "flush", "shell"]
-):
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(notify_expiring_assets, "interval", days=1)
-    scheduler.add_job(notify_expiring_documents, "interval", hours=4)
-    scheduler.add_job(mark_expired_assets, "interval", days=1)
-    scheduler.start()
+register_job(notify_expiring_assets, "interval", days=1)
+register_job(notify_expiring_documents, "interval", hours=4)
+register_job(mark_expired_assets, "interval", days=1)

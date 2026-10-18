@@ -10,9 +10,11 @@ from typing import Any
 
 from django import forms
 from django.apps import apps
+from django.core.exceptions import ValidationError
 from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 
 import payroll.models.models
 from base.forms import Form, ModelForm
@@ -45,6 +47,288 @@ from payroll.widgets import component_widgets as widget
 logger = logging.getLogger(__name__)
 
 
+class CalendarDaysOnlySelect(forms.Select):
+    """
+    "This amount is" (maximum_unit), with every option but calendar days
+    disabled rather than removed: an existing component already set to one
+    of the other three bases keeps displaying and working exactly as before
+    (the model field and its choices are untouched), but a new or edited one
+    can no longer be switched to it from this form.
+    """
+
+    ENABLED_VALUE = "month_calendar_days"
+
+    def create_option(
+        self, name, value, label, selected, index, subindex=None, attrs=None
+    ):
+        option = super().create_option(
+            name, value, label, selected, index, subindex, attrs
+        )
+        if str(value) != self.ENABLED_VALUE:
+            option["attrs"]["disabled"] = "disabled"
+        return option
+
+
+def restrict_maximum_unit_to_calendar_days(form):
+    """Swap in CalendarDaysOnlySelect for maximum_unit, keeping whatever
+    attrs (CSS classes etc.) and choices the form's own widget already carries.
+
+    A widget's `choices` is only ever populated via the field's `choices`
+    property setter, which forwards to `widget.choices` -- replacing
+    `field.widget` with a fresh instance skips that, leaving the new widget
+    with none and the rendered <select> with no <option> tags at all.
+    """
+    field = form.fields.get("maximum_unit")
+    if field is not None:
+        field.widget = CalendarDaysOnlySelect(attrs=field.widget.attrs)
+        field.widget.choices = field.choices
+
+
+def save_apply_conditions(form, commit):
+    """
+    Persist the extra "when it applies" rows posted alongside the component.
+
+    Rebuilt from the post each time rather than diffed: the rows have no
+    identity in the form, so matching them up would mean inventing one, and a
+    rule nobody can point at is not worth the machinery.
+    """
+    from payroll.models.models import ApplyCondition
+
+    data = form.data
+    choices = data.getlist("apply_choices") if hasattr(data, "getlist") else []
+    if not form.instance.pk:
+        return []
+
+    form.instance.apply_conditions.all().delete()
+
+    conditions = data.getlist("apply_conditions")
+    amounts = data.getlist("apply_amounts")
+    starts = data.getlist("apply_starts")
+    ends = data.getlist("apply_ends")
+    codes = data.getlist("apply_codes")
+
+    def number(values, index):
+        try:
+            return float(values[index])
+        except (IndexError, TypeError, ValueError):
+            return None
+
+    rows = []
+    for index, choice in enumerate(choices):
+        if not choice:
+            continue
+        condition = conditions[index] if index < len(conditions) else "gt"
+        row = ApplyCondition(
+            choice=choice,
+            condition=condition or "gt",
+            amount=number(amounts, index) or 0.0,
+            start_range=number(starts, index),
+            end_range=number(ends, index),
+            component_code=(codes[index] if index < len(codes) else "") or "",
+        )
+        row.save()
+        rows.append(row)
+
+    if commit and rows:
+        form.instance.apply_conditions.add(*rows)
+    return rows
+
+
+def apply_component_code_choices(form, model):
+    """
+    Turn percentage_of_code into a dropdown of codes that actually exist.
+
+    It is a plain CharField on the model — any component's code is a valid
+    target, including one not created yet — so it cannot be a ModelChoiceField.
+    But a free-text box for a value that has to match another record exactly is
+    a typo waiting to be a silently wrong payslip: an unknown code resolves to
+    0, which looks like a component that simply did not apply.
+
+    The component's own code is excluded; a formula or percentage referring to
+    itself reads either a stale value or nothing, depending on ordering.
+    """
+    from payroll.views.component_formula_views import available_codes
+
+    # The component's own code is derived from its title and is never typed, so
+    # it is not drawn on the form — but it still has to round-trip. Deriving it
+    # again on save only happens when it is blank, so a form that omitted it
+    # would re-derive from the current title and silently retarget every
+    # formula and percentage pointing at the old code.
+    if "code" in form.fields:
+        # Drawn: typed, or left blank to be derived from the title on save. Changing
+        # one that is already referenced would leave those formulas pointing at nothing.
+        form.fields["code"].required = False
+        form.fields["code"].widget.attrs.update(
+            {
+                "placeholder": _("Auto from title, e.g. HRA"),
+                # Upper-cased as it is typed; a style would capitalise the placeholder too.
+                "oninput": "this.value = this.value.toUpperCase();",
+                "autocomplete": "off",
+                "maxlength": 32,
+            }
+        )
+        form.fields["code"].help_text = _(
+            "Short name other components and formulas use to refer to this one "
+            "(capital letters, digits, underscore; starts with a letter). Leave "
+            "blank to make it from the title. Changing it later breaks anything "
+            "that refers to the old one."
+        )
+
+        def _upper(value):
+            return (value or "").strip().upper()
+
+        def _clean_code(value, _f=form.fields["code"]):
+            value = forms.CharField.clean(_f, _upper(value))
+            _f.run_validators(value)
+            instance = getattr(form, "instance", None)
+            pk = instance.pk if instance is not None and instance.pk else None
+            from payroll.models.models import component_code_taken
+
+            if component_code_taken(value, model, pk):
+                raise forms.ValidationError(
+                    _("The code %(code)s is already used by another component."),
+                    params={"code": value},
+                )
+            return value
+
+        form.fields["code"].clean = _clean_code
+
+    # Same reasoning as `code`: not drawn, but it has to survive an edit. A
+    # form that simply omitted it would blank the setting on the next save.
+    if "update_compensation" in form.fields:
+        form.fields["update_compensation"].widget = forms.HiddenInput()
+        form.fields["update_compensation"].required = False
+
+    # Eleven flat options, three different kinds of answer. Grouping them is
+    # what makes "Custom Formula" findable rather than something you have to
+    # already know is in there.
+    based_on = form.fields.get("based_on")
+    if based_on is not None:
+        from payroll.forms.component_layout import group_based_on_choices
+
+        group_based_on_choices(based_on)
+
+    field = form.fields.get("percentage_of_code")
+    if field is None:
+        return
+
+    instance = getattr(form, "instance", None)
+    exclude_pk = instance.pk if instance is not None and instance.pk else None
+    rows = available_codes(exclude_pk=exclude_pk, exclude_model=model)
+
+    choices = [("", _("Select a component..."))]
+    # Labelled by name. The code is derived plumbing the user never chose, so
+    # showing it here would ask them to recognise an identifier instead of the
+    # component they created.
+    choices += [
+        (
+            row["code"],
+            # Under a CTC Down structure basic is worked out from a component, not
+            # read off the contract; the label says which "Basic pay" this is.
+            (
+                f'{row["label"]} ({_("CTC Down structure")})'
+                if row["code"] == "BASIC"
+                else row["label"]
+            ),
+        )
+        for row in rows
+    ]
+
+    current = (
+        (form.data.get("percentage_of_code") if form.is_bound else None)
+        or getattr(instance, "percentage_of_code", "")
+        or ""
+    )
+    # Keep whatever is already stored selectable even if that code has since
+    # been renamed or removed, so re-saving cannot silently retarget it.
+    if current and not any(current == value for value, _label in choices):
+        choices.insert(1, (current, f"{current} ({_('currently set')})"))
+
+    # Styled like the form's other dropdowns. Not copied from the field being
+    # replaced: on the model this is a plain CharField, so its widget is a text
+    # input and its classes are the text-input ones. Rebuilding it as a
+    # ChoiceField without this left the one bare browser dropdown on a form
+    # where every other select is oh-select / select2.
+    form.fields["percentage_of_code"] = forms.ChoiceField(
+        choices=choices,
+        required=False,
+        label=field.label,
+        help_text=field.help_text,
+        initial=field.initial,
+        widget=forms.Select(attrs=_select_attrs(form)),
+    )
+
+    # The same list for the "when it applies" rule, which measures a component
+    # rather than taking a share of it. Deliberately a separate field: what a
+    # component is a percentage OF and what decides whether it applies at all
+    # are different questions and are often different components.
+    gate = form.fields.get("if_component_code")
+    if gate is not None:
+        gate_current = (
+            (form.data.get("if_component_code") if form.is_bound else None)
+            or getattr(instance, "if_component_code", "")
+            or ""
+        )
+        gate_choices = list(choices)
+        if gate_current and not any(
+            gate_current == value for value, _label in gate_choices
+        ):
+            gate_choices.insert(
+                1, (gate_current, f"{gate_current} ({_('currently set')})")
+            )
+        form.fields["if_component_code"] = forms.ChoiceField(
+            choices=gate_choices,
+            required=False,
+            label=gate.label,
+            help_text=gate.help_text,
+            initial=gate.initial,
+            widget=forms.Select(attrs=_select_attrs(form)),
+        )
+
+
+def _select_attrs(form):
+    """
+    The widget attrs this form puts on an ordinary single-choice dropdown.
+
+    Read off a sibling rather than hardcoded, so it keeps matching if the form
+    styling changes.
+    """
+    for name in ("based_on", "if_choice", "if_condition", "maximum_unit"):
+        widget = form.fields[name].widget if name in form.fields else None
+        if isinstance(widget, forms.Select) and not isinstance(
+            widget, forms.SelectMultiple
+        ):
+            if widget.attrs.get("class"):
+                return dict(widget.attrs)
+    return {"class": "oh-select oh-select-2"}
+
+
+def restrict_to_system_fields(form):
+    """
+    Cut a system component's form down to the settings that mean anything.
+
+    A template does not hold an amount, a formula, a rate or a list of
+    employees: the loan schedule decides the amount, the attendance record
+    decides the days, and the generator decides who it applies to. Leaving
+    those fields on the form would offer settings that change nothing, which is
+    worse than not offering them — someone sets a rate on "Loan repayment",
+    saves, and reasonably expects repayments to change.
+
+    So only the tax treatment and the proration basis survive, and only the
+    ones that kind actually has. See payroll/system_components.py.
+    """
+    from payroll.system_components import editable_fields
+
+    instance = getattr(form, "instance", None)
+    if instance is None or not getattr(instance, "is_system", False):
+        return
+
+    keep = set(editable_fields(instance.system_key))
+    for name in list(form.fields):
+        if name not in keep:
+            del form.fields[name]
+
+
 class AllowanceForm(ModelForm):
     """
     Form for Allowance model
@@ -75,6 +359,12 @@ class AllowanceForm(ModelForm):
 
         if not self.instance.pk:
             self.fields["one_time_date"].initial = None
+        apply_component_code_choices(self, payroll.models.models.Allowance)
+        restrict_to_system_fields(self)
+        from payroll.forms.component_layout import apply_labels
+
+        apply_labels(self)
+        restrict_maximum_unit_to_calendar_days(self)
 
     def as_p(self):
         """
@@ -136,6 +426,7 @@ class AllowanceForm(ModelForm):
             logger(e)
         if commit:
             self.instance.other_conditions.add(*multiple_conditions)
+        save_apply_conditions(self, commit)
         return multiple_conditions
 
 
@@ -174,6 +465,12 @@ class DeductionForm(ModelForm):
                 }
             kwargs["initial"] = initial
         super().__init__(*args, **kwargs)
+        apply_component_code_choices(self, payroll.models.models.Deduction)
+        restrict_to_system_fields(self)
+        from payroll.forms.component_layout import apply_labels
+
+        apply_labels(self)
+        restrict_maximum_unit_to_calendar_days(self)
 
     def clean(self, *args, **kwargs):
         cleaned_data = super().clean(*args, **kwargs)
@@ -233,7 +530,15 @@ class DeductionForm(ModelForm):
         specific_employees = self.data.getlist("specific_employees")
         include_all = self.data.get("include_active_employees")
         condition_based = self.data.get("is_condition_based")
-        if not specific_employees and not include_all and not condition_based:
+        in_structure = (
+            bool(self.instance.pk) and self.instance.salary_structures.exists()
+        )
+        if (
+            not specific_employees
+            and not include_all
+            and not condition_based
+            and not in_structure
+        ):
             self.instance.include_active_employees = True
         super().save(commit)
         other_conditions = self.data.getlist("other_conditions")
@@ -256,6 +561,7 @@ class DeductionForm(ModelForm):
             print(e)
         if commit:
             self.instance.other_conditions.add(*multiple_conditions)
+        save_apply_conditions(self, commit)
         return multiple_conditions
 
 
@@ -282,7 +588,10 @@ class SalaryStructureForm(ModelForm):
         """
 
         model = SalaryStructure
-        fields = ["title", "allowances", "deductions"]
+        # structure_mode was missing, which made CTC Down unreachable: the mode
+        # existed on the model and was read by the engine, but nothing outside a
+        # shell could set it.
+        fields = ["title", "structure_mode", "allowances", "deductions"]
 
     def _employees_on_structure(self):
         if not self.instance.pk:
@@ -294,12 +603,26 @@ class SalaryStructureForm(ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["allowances"].queryset = self.fields["allowances"].queryset.exclude(
-            only_show_under_employee=True
+        # Neither the per-employee rows a loan generates nor the standard
+        # components that govern them belong in a structure: the first are
+        # already targeted at one person, the second are never paid at all.
+        self.fields["allowances"].queryset = (
+            self.fields["allowances"]
+            .queryset.exclude(only_show_under_employee=True)
+            .exclude(is_system=True)
         )
-        self.fields["deductions"].queryset = self.fields["deductions"].queryset.exclude(
-            only_show_under_employee=True
+        self.fields["deductions"].queryset = (
+            self.fields["deductions"]
+            .queryset.exclude(only_show_under_employee=True)
+            .exclude(is_system=True)
         )
+        # Only employees this structure may actually take on: an active
+        # contract, and that contract not already naming another structure.
+        # Offering the rest was offering to silently move someone off whatever
+        # structure they were on.
+        from payroll.methods.structure_rules import assignable_employees
+
+        self.fields["employees"].queryset = assignable_employees(self.instance)
         if self.instance.pk:
             self.initial["employees"] = self._employees_on_structure()
 
@@ -309,22 +632,76 @@ class SalaryStructureForm(ModelForm):
         self.errors.pop("employees", None)
         employees = Employee.objects.filter(pk__in=self.data.getlist("employees"))
         cleaned_data["employees"] = employees
-        no_active_contract = [
-            employee
-            for employee in employees
-            if not employee.contract_set.filter(contract_status="active").exists()
-        ]
+        # Enforced here as well as in the queryset: the multi-select's own
+        # filter panel queries employees through a generic route that knows
+        # nothing about this restriction, so the list is not the last word on
+        # what can be submitted.
+        from payroll.methods.structure_rules import unassignable_reason
+
+        no_active_contract = []
+        taken = []
+        for employee in employees:
+            reason = unassignable_reason(employee, self.instance)
+            if reason == "no_contract":
+                no_active_contract.append(employee)
+            elif reason is not None:
+                taken.append((employee, reason))
+
+        problems = []
         if no_active_contract:
-            names = ", ".join(str(employee) for employee in no_active_contract)
-            raise forms.ValidationError(
-                {
-                    "employees": _(
-                        "These employees have no active contract, so a salary "
-                        "structure can't be assigned to them: %(names)s"
+            problems.append(
+                _(
+                    "These employees have no active contract, so a salary "
+                    "structure can't be assigned to them: %(names)s"
+                )
+                % {"names": ", ".join(str(one) for one in no_active_contract)}
+            )
+        if taken:
+            problems.append(
+                _(
+                    "These employees are already on another salary structure. "
+                    "Remove them from it first, or change their contract: "
+                    "%(names)s"
+                )
+                % {
+                    "names": ", ".join(
+                        f"{employee} ({structure})" for employee, structure in taken
                     )
-                    % {"names": names}
                 }
             )
+        if problems:
+            raise forms.ValidationError({"employees": problems})
+
+        # One basic pay component per structure.
+        flagged = [
+            allowance
+            for allowance in (cleaned_data.get("allowances") or [])
+            if getattr(allowance, "is_basic_pay", False)
+        ]
+        if len(flagged) > 1:
+            raise forms.ValidationError(
+                {
+                    "allowances": _(
+                        "A structure can have only one basic pay component. "
+                        "Marked as basic pay: %(names)s"
+                    )
+                    % {"names": ", ".join(str(one) for one in flagged)}
+                }
+            )
+
+        # The component set has to agree with what the mode says the contract
+        # wage means. Checked here rather than in Model.clean() because the M2M
+        # is not populated during model validation.
+        from payroll.methods.structure_rules import structure_problems
+
+        problems = structure_problems(
+            cleaned_data.get("structure_mode"),
+            cleaned_data.get("allowances") or [],
+            cleaned_data.get("deductions") or [],
+        )
+        if problems:
+            raise forms.ValidationError({"allowances": problems})
+
         return cleaned_data
 
     def save(self, commit=True):
@@ -635,9 +1012,6 @@ class ContractExportFieldForm(forms.Form):
     )
 
 
-from django.core.exceptions import ValidationError
-
-
 def rate_validator(value):
     """
     Percentage validator
@@ -657,7 +1031,7 @@ class BonusForm(Form):
     date = forms.DateField(widget=forms.DateInput(), required=False)
     employee_id = forms.IntegerField(label="Employee", widget=forms.HiddenInput())
     is_fixed = forms.BooleanField(
-        label="Is Fixed", initial=True, required=False, widget=forms.CheckboxInput()
+        label="Fixed", initial=True, required=False, widget=forms.CheckboxInput()
     )
     amount = forms.DecimalField(
         label="Amount",
@@ -777,32 +1151,70 @@ class LoanAccountForm(ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.initial["provided_date"] = str(datetime.date.today())
-        self.initial["installment_start_date"] = str(datetime.date.today())
+        if not self.instance.pk:
+            self.initial["provided_date"] = str(datetime.date.today())
+            self.initial["installment_start_date"] = str(datetime.date.today())
         if self.instance.pk:
             self.verbose_name = self.instance.title
-            fields_to_exclude = ["employee_id", "installment_start_date"]
+            # <input type="date"> needs YYYY-MM-DD; the DateTimeInput widget
+            # doesn't render date objects that way, so pass strings.
+            if self.instance.provided_date:
+                self.initial["provided_date"] = str(self.instance.provided_date)
+            if self.instance.installment_start_date:
+                self.initial["installment_start_date"] = str(
+                    self.instance.installment_start_date
+                )
+            # Edit shows the same fields as create; the ones that must not
+            # change any more are locked (disabled) instead of removed, so
+            # both forms keep an identical layout across the Loan / Salary
+            # Advance / Fine tabs.
+            locked_fields = []
             if Payslip.objects.filter(
                 installment_ids__in=list(
                     self.instance.deduction_ids.values_list("id", flat=True)
                 )
             ).exists():
-                fields_to_exclude = fields_to_exclude + [
+                # Once an installment is on a paid payslip the schedule can
+                # no longer be regenerated (see payroll.signals
+                # create_installments), so these become read-only.
+                locked_fields += [
+                    "employee_id",
                     "loan_amount",
                     "installments",
                     "installment_amount",
+                    "installment_start_date",
                 ]
-            self.initial["provided_date"] = str(self.instance.provided_date)
-            for field in fields_to_exclude:
-                if field in self.fields:
-                    del self.fields[field]
+            for field_name in locked_fields:
+                if field_name not in self.fields:
+                    continue
+                field = self.fields[field_name]
+                field.disabled = True
+                if field_name == "employee_id":
+                    # Disabled selects normally render as bare text (see
+                    # .oh-select:disabled in the theme) - opt this one back
+                    # into a boxed look via oh-select--boxed-locked so it
+                    # doesn't stand out next to the other fields here.
+                    attrs = field.widget.attrs
+                    attrs["class"] = (
+                        attrs.get("class", "") + " oh-select--boxed-locked"
+                    ).strip()
 
     def clean(self, *args, **kwargs):
         cleaned_data = super().clean(*args, **kwargs)
 
-        if not self.instance.pk and cleaned_data.get(
-            "installment_start_date"
-        ) < cleaned_data.get("provided_date"):
+        start_date = cleaned_data.get("installment_start_date")
+        provided_date = cleaned_data.get("provided_date")
+        dates_touched = (
+            not self.instance.pk
+            or "installment_start_date" in self.changed_data
+            or "provided_date" in self.changed_data
+        )
+        if (
+            start_date
+            and provided_date
+            and dates_touched
+            and start_date < provided_date
+        ):
             raise forms.ValidationError(
                 _(
                     "Installment start date should be greater than or equal to provided date"
@@ -891,6 +1303,18 @@ class ReimbursementForm(ModelForm):
 
         self.initial["employee_id"] = self.employee.id if self.employee else None
 
+        # When opened from a specific tab (Reimbursements / Leave Encashments /
+        # Bonus Encashments), the tab's own Create button passes ?type=... so
+        # the record being created always matches the tab it was opened from -
+        # the Type field is then locked instead of shown as a free choice.
+        self.fixed_type = (
+            self.request.GET.get("type")
+            if self.request and not self.instance.pk
+            else None
+        )
+        if self.fixed_type:
+            self.initial["type"] = self.fixed_type
+
         self.configure_fields()
 
     def get_employee(self):
@@ -929,9 +1353,10 @@ class ReimbursementForm(ModelForm):
         self.setup_leave_fields()
 
         self.fields["type"].widget.attrs["onchange"] = "toggleReimbursmentType($(this))"
-        self.fields["employee_id"].widget.attrs[
-            "onchange"
-        ] = "getAssignedLeave($(this))"
+        self.fields["employee_id"].widget.attrs["onchange"] = (
+            "getAssignedLeave($(this)); "
+            "if (window.refreshBonusPointsNote) refreshBonusPointsNote();"
+        )
 
         self.fields["allowance_on"].widget = forms.DateInput(
             attrs={"type": "date", "class": "oh-input w-100"}
@@ -939,6 +1364,11 @@ class ReimbursementForm(ModelForm):
 
         self.fields["attachment"] = MultipleFileField(label="Attachments")
         self.fields["attachment"].widget.attrs["accept"] = ".jpg, .jpeg, .png, .pdf"
+
+        # Also hidden when editing - which type a record is doesn't change
+        # after creation, so there's nothing to pick here either.
+        if self.fixed_type or self.instance.pk:
+            self.fields["type"].widget = forms.HiddenInput()
 
         self.exclude_fields_by_type(exclude_fields)
 
@@ -967,20 +1397,20 @@ class ReimbursementForm(ModelForm):
         type = (
             self.data.get("type")
             if self.data
-            else self.instance.type if self.instance else None
+            else (self.fixed_type or (self.instance.type if self.instance else None))
         )
         is_edit = self.instance and self.instance.pk
 
-        if type == "reimbursement" and (is_edit or self.data):
+        if type == "reimbursement" and (is_edit or self.data or self.fixed_type):
             exclude_fields += [
                 "leave_type_id",
                 "cfd_to_encash",
                 "ad_to_encash",
                 "bonus_to_encash",
             ]
-        elif type == "leave_encashment" and (is_edit or self.data):
+        elif type == "leave_encashment" and (is_edit or self.data or self.fixed_type):
             exclude_fields += ["attachment", "amount", "bonus_to_encash"]
-        elif type == "bonus_encashment" and (is_edit or self.data):
+        elif type == "bonus_encashment" and (is_edit or self.data or self.fixed_type):
             exclude_fields += [
                 "attachment",
                 "amount",
@@ -1102,11 +1532,10 @@ class ReimbursementForm(ModelForm):
                     notify.send(
                         instance.employee_id,  # 816
                         recipient=manager.employee_user_id,
-                        verb=f"You have a new reimbursement request to approve for {instance.employee_id}.",
-                        verb_ar=f"لديك طلب استرداد نفقات جديد يتعين عليك الموافقة عليه لـ {instance.employee_id}.",
-                        verb_de=f"Sie haben einen neuen Rückerstattungsantrag zur Genehmigung für {instance.employee_id}.",
-                        verb_es=f"Tienes una nueva solicitud de reembolso para aprobar para {instance.employee_id}.",
-                        verb_fr=f"Vous avez une nouvelle demande de remboursement à approuver pour {instance.employee_id}.",
+                        verb=gettext_noop(
+                            "You have a new reimbursement request to approve for %(employee)s."
+                        ),
+                        verb_params={"employee": str(instance.employee_id)},
                         icon="information",
                         redirect=f"/payroll/view-reimbursement?id={instance.id}",
                     )

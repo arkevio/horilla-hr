@@ -10,7 +10,7 @@ from django.contrib import messages
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
-from django.db.models import Case, When
+from django.db.models import Case, Q, When
 from django.urls import reverse, reverse_lazy
 from django.utils import timezone
 from django.utils.html import format_html
@@ -123,10 +123,12 @@ class Company(HorillaModel):
         return str(self.company)
 
     def company_icon_with_name(self):
+        from django.templatetags.static import static
 
+        icon_url = self.icon.url if self.icon else static("images/ui/auth-logo.png")
         return format_html(
             '<img src="{}" style="width: 30px; border-radius: 100%; display:inline;" class="oh-profile__image" alt="" /> {}',
-            self.icon.url,
+            icon_url,
             self.company,
         )
 
@@ -714,7 +716,7 @@ class RotatingWorkTypeAssign(HorillaModel):
         """
 
         if self.is_active:
-            return "Is Active"
+            return "Active"
         else:
             return "Archived"
 
@@ -1288,7 +1290,7 @@ class RotatingShiftAssign(HorillaModel):
         """
 
         if self.is_active:
-            return "Is Active"
+            return "Active"
         else:
             return "Archived"
 
@@ -1773,6 +1775,18 @@ class ShiftRequest(HorillaModel):
             context={"instance": self},
         )
 
+    def allocated_detail_confirm_action(self):
+        """
+        Action buttons for the Allocated Shift Request detail modal - same
+        buttons, same order, same per-role conditions as
+        allocated_confirm_action_col's row actions.
+        """
+
+        return render_template(
+            path="cbv/shift_request/allocated_detail_confirm_action.html",
+            context={"instance": self},
+        )
+
     def user_availability(self):
         """
         This method for get custom column for HorillaUser availability.
@@ -1814,6 +1828,18 @@ class ShiftRequest(HorillaModel):
 
         return render_template(
             path="cbv/shift_request/actions_shift_requst.html",
+            context={"instance": self},
+        )
+
+    def shift_detail_confirm_action(self):
+        """
+        Action buttons for the Shift Request detail modal - same buttons,
+        same order, same per-role conditions as shift_actions's row
+        actions (Edit, Duplicate, Remove, Approve, Reject).
+        """
+
+        return render_template(
+            path="cbv/shift_request/shift_detail_confirm_action.html",
             context={"instance": self},
         )
 
@@ -2607,13 +2633,21 @@ class EmailLog(models.Model):
     to = models.EmailField()
     status = models.CharField(max_length=6, choices=statuses)
     created_at = models.DateTimeField(auto_now_add=True)
-    objects = models.Manager()
     company_id = models.ForeignKey(
         Company, on_delete=models.CASCADE, null=True, editable=False
     )
+    # Was a plain Manager(), so the company_id below was never filtered on and
+    # the mail-log views -- which match only on recipient address -- could show
+    # one tenant's mail to another. Bodies are redacted on write; see
+    # base/email_redaction.py.
+    objects = HorillaCompanyManager()
 
     def __str__(self) -> str:
         return f"{self.subject} {self.to}"
+
+    def subject_display(self):
+        """The subject HTML-escaped, for list cells that render values as safe."""
+        return format_html("{}", self.subject)
 
     def status_display(self):
         status = dict(self.statuses).get(self.status)
@@ -2797,7 +2831,7 @@ class Holidays(HorillaModel):
     start_date = models.DateField(verbose_name=_("Start Date"))
     end_date = models.DateField(null=True, blank=True, verbose_name=_("End Date"))
     recurring = models.BooleanField(default=False, verbose_name=_("Recurring"))
-    is_specific = models.BooleanField(default=False, verbose_name=_("Is Specific"))
+    is_specific = models.BooleanField(default=False, verbose_name=_("Specific"))
     assigning_type = models.CharField(
         choices=ASSIGNING_TYPE,
         max_length=100,
@@ -2821,6 +2855,7 @@ class Holidays(HorillaModel):
     company_id = models.ForeignKey(
         Company,
         null=True,
+        blank=True,
         on_delete=models.PROTECT,
         verbose_name=_("Company"),
     )
@@ -2829,9 +2864,34 @@ class Holidays(HorillaModel):
     class Meta:
         verbose_name = _("Holiday")
         verbose_name_plural = _("Holidays")
+        constraints = [
+            # NULLs are distinct in a unique index, so company-scoped and
+            # global (company_id=None) holidays need separate constraints.
+            models.UniqueConstraint(
+                fields=["start_date", "end_date", "company_id"],
+                name="unique_holiday_dates_per_company",
+                violation_error_message=_(
+                    "A holiday already exists for this date range in this company."
+                ),
+            ),
+            models.UniqueConstraint(
+                fields=["start_date", "end_date"],
+                condition=models.Q(company_id__isnull=True),
+                name="unique_global_holiday_dates",
+                violation_error_message=_(
+                    "A holiday already exists for this date range for all companies."
+                ),
+            ),
+        ]
 
     def __str__(self):
         return self.name
+
+    def get_company_name(self):
+        return self.company_id.company if self.company_id else _("All Companies")
+
+    def get_available_for_all_status(self):
+        return _("No") if self.is_specific else _("Yes")
 
     def detail_view(self):
         """
@@ -3196,6 +3256,35 @@ class DefaultExportPermission(HorillaModel):
         verbose_name=_("Company"),
     )
     objects = models.Manager()
+
+    class Meta:
+        # Every reader does .filter(company_id=...).first(), so a second row
+        # for the same company silently decides the setting by insertion
+        # order. One row per company, plus one for the NULL "all companies"
+        # scope.
+        #
+        # Two constraints rather than one with nulls_distinct=False: that
+        # flag needs PostgreSQL 15+, and Django SKIPS the constraint
+        # silently on older servers -- so on Postgres 14 it would enforce
+        # nothing while looking correct. A partial unique index works
+        # everywhere.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["company_id"],
+                condition=Q(company_id__isnull=False),
+                name="unique_default_export_permission_per_company",
+            ),
+            # Postgres treats every NULL as distinct, so a plain unique index
+            # on company_id does NOT stop a second "all companies" row
+            # (verified: two NULL rows insert happily). Indexing the constant
+            # expression company_id IS NULL gives that partial index a single
+            # possible key, which is what makes it a one-row guard.
+            models.UniqueConstraint(
+                Q(company_id__isnull=True),
+                condition=Q(company_id__isnull=True),
+                name="unique_default_export_permission_all_companies",
+            ),
+        ]
 
     def __str__(self):
         return f"Default Export Access for {self.company_id} is {'enabled' if self.is_enabled else 'disabled'}"

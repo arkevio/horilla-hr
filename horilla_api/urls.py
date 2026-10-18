@@ -16,8 +16,10 @@ schema_view = get_schema_view(
         contact=openapi.Contact(email="support@horilla.com"),
         license=openapi.License(name="BSD License"),
     ),
-    public=True,
-    permission_classes=(permissions.AllowAny,),
+    public=settings.DEBUG,
+    permission_classes=(
+        (permissions.AllowAny,) if settings.DEBUG else (permissions.IsAdminUser,)
+    ),
     generator_class=OrderedTagSchemaGenerator,
 )
 
@@ -48,4 +50,6 @@ urlpatterns = [
     path("offboarding/", include("horilla_api.api_urls.offboarding.urls")),
     path("recruitment/", include("horilla_api.api_urls.recruitment.urls")),
     path("pms/", include("horilla_api.api_urls.pms.urls")),
+    # Screen-shaped aggregates for the mobile client; see api_views/mobile.
+    path("mobile/", include("horilla_api.api_urls.mobile.urls")),
 ]

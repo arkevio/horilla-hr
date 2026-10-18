@@ -20,7 +20,7 @@ from django.utils.translation import gettext_lazy as _
 from accessibility.cbv_decorators import enter_if_accessible
 from accessibility.models import DefaultAccessibility
 from base.context_processors import enable_profile_edit
-from base.methods import has_export_access, is_reportingmanager
+from base.methods import eval_validate, has_export_access, is_reportingmanager
 from employee.filters import EmployeeFilter
 from employee.forms import BulkUpdateFieldForm, EmployeeExportExcelForm
 from employee.models import Employee, EmployeeBankDetails, EmployeeWorkInformation
@@ -140,12 +140,19 @@ class EmployeesList(HorillaListView):
     bulk_update_fields = [
         "experience",
         "gender",
+        "dob",
         "country",
         "state",
         "city",
+        "address",
         "zip",
         "marital_status",
         "children",
+        "emergency_contact",
+        "emergency_contact_name",
+        "emergency_contact_relation",
+        "employee_work_info__email",
+        "employee_work_info__mobile",
         "employee_work_info__department_id",
         "employee_work_info__job_position_id",
         "employee_work_info__job_role_id",
@@ -155,8 +162,24 @@ class EmployeesList(HorillaListView):
         "employee_work_info__employee_type_id",
         "employee_work_info__location",
         "employee_work_info__date_joining",
+        "employee_work_info__basic_salary",
+        "employee_work_info__salary_hour",
+        "employee_work_info__contract_end_date",
         "employee_work_info__company_id",
+        "employee_bank_details__bank_name",
+        "employee_bank_details__branch",
+        "employee_bank_details__any_other_code1",
+        "employee_bank_details__any_other_code2",
+        "employee_bank_details__country",
+        "employee_bank_details__state",
+        "employee_bank_details__city",
     ]
+
+    def import_accessibility(self) -> bool:
+        # Employees are imported from Actions > Import (the work-information
+        # template); the list's own quick import, offered in the empty state,
+        # is not shown.
+        return False
 
     import_fields = [
         "badge_id",
@@ -300,7 +323,40 @@ class EmployeesList(HorillaListView):
             ),
         )
 
+        form.fields["employee_bank_details__country"] = forms.ChoiceField(
+            required=False,
+            widget=forms.Select(
+                attrs={
+                    "class": "oh-select oh-select-2",
+                    "style": "width: 100%; height:45px;",
+                }
+            ),
+        )
+
+        form.fields["employee_bank_details__state"] = forms.ChoiceField(
+            required=False,
+            widget=forms.Select(
+                attrs={
+                    "class": "oh-select oh-select-2",
+                    "style": "width: 100%; height:45px;",
+                }
+            ),
+        )
+
         return form
+
+    def handle_bulk_submission(self, request):
+        """
+        Ensure work info / bank details rows exist for every selected employee
+        before the bulk update runs, mirroring the legacy bulk-update view, so
+        `employee_work_info__*` and `employee_bank_details__*` fields also get
+        applied to employees who don't have those related rows yet.
+        """
+        instance_ids = eval_validate(request.POST.get("instance_ids", "[]"))
+        for employee_id in instance_ids:
+            EmployeeWorkInformation.objects.get_or_create(employee_id_id=employee_id)
+            EmployeeBankDetails.objects.get_or_create(employee_id_id=employee_id)
+        return super().handle_bulk_submission(request)
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -358,12 +414,14 @@ class EmployeesList(HorillaListView):
                    """
     }
 
+    # A real navigation, not hx-get/hx-push-url into #listContainer: htmx
+    # takes over the browser's Back button for any URL it pushes that way,
+    # and its own history-restore always replaces the whole page body in one
+    # shot -- even on a cache hit, that full teardown-and-rebuild reads as
+    # the page reloading. A real link leaves Back to the browser's own
+    # native history, which is instant and flicker-free.
     row_attrs = """
-                {diff_cell}
-                hx-get="{get_profile_url}"
-                hx-target="#listContainer"
-                hx-swap="innerHTML"
-                hx-push-url="{get_individual_url}"
+                onclick="window.location.href='{get_individual_url}'"
                 class="cursor-pointer"
                 """
     sortby_mapping = [
@@ -525,10 +583,13 @@ class EmployeeNav(HorillaNavView):
     For nav bar
     """
 
+    modern_filter = True
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.search_url = reverse("employees-list")
         self.search_in = [
+            ("badge_id", _("Badge ID")),
             ("employee_work_info__reporting_manager_id", _("Reporting Manager")),
             (
                 "employee_work_info__department_id",
@@ -571,7 +632,6 @@ class EmployeeNav(HorillaNavView):
                     data-target="#employeeExport"
                     hx-get="{reverse('employees-export')}"
                     hx-target="#employeeExportForm"
-                    hx-vals='js:{{"has_selection": (JSON.parse(document.getElementById("selectedInstances")?.getAttribute("data-ids")||"[]").length>0)}}'
                     style="cursor: pointer;"
                     """,
                 }
@@ -604,9 +664,16 @@ class EmployeeNav(HorillaNavView):
                         """,
                     },
                     {
-                        "action": _("Bulk Update"),
+                        "action": _("Reset Password"),
                         "attrs": """
-                        id="employeeBulkUpdateId"
+                        id="resetPasswordEmployees"
+                        style="cursor: pointer;"
+                        """,
+                    },
+                    {
+                        "action": _("Send Invitation"),
+                        "attrs": """
+                        id="sendInvitationEmployees"
                         style="cursor: pointer;"
                         """,
                     },
@@ -725,9 +792,22 @@ class ExportView(TemplateView):
         employee = Employee.objects.filter(is_active=True)
         export_form = EmployeeExportExcelForm()
         export_filter = EmployeeFilter(queryset=employee)
+        # The AJAX comboboxes get ids derived from their field key
+        # ("id_filter_employee_company", ...), the same ones the page's own
+        # filter panel already uses. Two selects with one id break select2
+        # (its container/results ids and aria-owns resolve to the wrong
+        # element), so the Work Info dropdowns in this modal opened and
+        # immediately closed. Give the export copies their own ids; the
+        # template's <label for> follows via id_for_label.
+        for field_name in EmployeeFilter.ajax_fields:
+            field = export_filter.form.fields.get(field_name)
+            current_id = field.widget.attrs.get("id") if field else None
+            if current_id:
+                field.widget.attrs["id"] = current_id.replace(
+                    "id_filter_", "id_export_filter_", 1
+                )
         context["export_form"] = export_form
         context["export_filter"] = export_filter
-        context["hide_export_filters"] = self.request.GET.get("has_selection") == "true"
         return context
 
 
@@ -822,12 +902,11 @@ class EmployeeCard(HorillaCardView):
 
     custom_body_template = "cbv/employees_view/card_body.html"
 
+    # See EmployeesList.row_attrs' comment: a real navigation so the
+    # browser's own Back/Forward history handles this, not htmx's.
     card_attrs = """
-                {diff_cell}
-                hx-get="{get_profile_url}"
-                hx-target="#listContainer"
-                hx-swap="innerHTML"
-                hx-push-url="{get_individual_url}"
+                onclick="window.location.href='{get_individual_url}'"
+                style="cursor:pointer"
                 """
 
 

@@ -17,9 +17,53 @@ from payroll.cbv import (
     salary_structure,
 )
 from payroll.models.models import Deduction
-from payroll.views import component_views
+from payroll.views import (
+    component_formula_views,
+    component_views,
+    salary_structure_preview,
+)
 
 urlpatterns = [
+    path(
+        "component-code-check/",
+        component_formula_views.check_component_code,
+        name="component-code-check",
+    ),
+    path(
+        "component-applies-rows/",
+        component_formula_views.component_applies_rows,
+        name="component-applies-rows",
+    ),
+    path(
+        "component-formula-preview/",
+        component_formula_views.preview_component_formula,
+        name="component-formula-preview",
+    ),
+    path(
+        "component-limit-preview/",
+        component_formula_views.preview_maximum_unit,
+        name="component-limit-preview",
+    ),
+    path(
+        "component-library/",
+        component_formula_views.component_library_picker,
+        name="component-library",
+    ),
+    path(
+        "load-component-library/",
+        component_formula_views.load_component_library,
+        name="load-component-library",
+    ),
+    path(
+        "salary-structure-preview/<int:pk>/",
+        salary_structure_preview.preview_salary_structure,
+        name="salary-structure-preview",
+    ),
+    path(
+        "salary-structure-employees/<int:pk>/",
+        salary_structure_preview.salary_structure_employees,
+        name="salary-structure-employees",
+    ),
     path(
         "individual-payslip-tab-list/<int:pk>/",
         payslip.PayrollTab.as_view(),
@@ -28,6 +72,16 @@ urlpatterns = [
     path("view-payslip/", payslip.PayslipView.as_view(), name="view-payslip"),
     path("payslip-list/", payslip.PayslipList.as_view(), name="payslip-list"),
     path("payslip-navbar/", payslip.PayslipNav.as_view(), name="payslip-navbar"),
+    path(
+        "payslip-run-list/<int:batch_id>/",
+        payslip.PayslipRunList.as_view(),
+        name="payslip-run-list",
+    ),
+    path(
+        "payslip-run-navbar/<int:batch_id>/",
+        payslip.PayslipRunNav.as_view(),
+        name="payslip-run-navbar",
+    ),
     path(
         "payslip-bulk-export-data",
         payslip.PayslipBulkExport.as_view(),
@@ -87,9 +141,34 @@ urlpatterns = [
         name="fines-list-view",
     ),
     path(
-        "loan-navbar-view/",
-        loan_advance_salary.LoanNavView.as_view(),
-        name="loan-navbar-view",
+        "loan-nav/",
+        loan_advance_salary.LoanNav.as_view(),
+        name="loan-nav",
+    ),
+    path(
+        "advanced-salary-nav/",
+        loan_advance_salary.AdvancedSalaryNav.as_view(),
+        name="advanced-salary-nav",
+    ),
+    path(
+        "fine-nav/",
+        loan_advance_salary.FineNav.as_view(),
+        name="fine-nav",
+    ),
+    path(
+        "loan-tab-shell/",
+        loan_advance_salary.LoanTabShell.as_view(),
+        name="loan-tab-shell",
+    ),
+    path(
+        "advanced-salary-tab-shell/",
+        loan_advance_salary.AdvancedSalaryTabShell.as_view(),
+        name="advanced-salary-tab-shell",
+    ),
+    path(
+        "fine-tab-shell/",
+        loan_advance_salary.FineTabShell.as_view(),
+        name="fine-tab-shell",
     ),
     path(
         "loan-detail-view/<int:pk>/",
@@ -100,6 +179,16 @@ urlpatterns = [
         "loan-create-form/",
         loan_advance_salary.LoanFormView.as_view(),
         name="loan-create-form",
+    ),
+    path(
+        "advanced-salary-create-form/",
+        loan_advance_salary.AdvancedSalaryFormView.as_view(),
+        name="advanced-salary-create-form",
+    ),
+    path(
+        "fine-create-form/",
+        loan_advance_salary.FineFormView.as_view(),
+        name="fine-create-form",
     ),
     path(
         "loan-edit-form/<int:pk>/",
@@ -347,6 +436,11 @@ urlpatterns = [
         name="get-assigned-leaves",
     ),
     path(
+        "bonus-points-note/",
+        component_views.bonus_points_note,
+        name="bonus-points-note",
+    ),
+    path(
         "approve-reimbursements/",
         component_views.approve_reimbursements,
         name="approve-reimbursements",
@@ -388,8 +482,33 @@ urlpatterns = [
     ),
     path(
         "reimbursement-nav/",
-        reimbursements.ReimbursementsNav.as_view(),
+        reimbursements.ReimbursementNav.as_view(),
         name="reimbursement-nav",
+    ),
+    path(
+        "leave-encash-nav/",
+        reimbursements.LeaveEncashNav.as_view(),
+        name="leave-encash-nav",
+    ),
+    path(
+        "bonus-encash-nav/",
+        reimbursements.BonusEncashNav.as_view(),
+        name="bonus-encash-nav",
+    ),
+    path(
+        "reimbursement-tab-shell/",
+        reimbursements.ReimbursementTabShell.as_view(),
+        name="reimbursement-tab-shell",
+    ),
+    path(
+        "leave-encash-tab-shell/",
+        reimbursements.LeaveEncashTabShell.as_view(),
+        name="leave-encash-tab-shell",
+    ),
+    path(
+        "bonus-encash-tab-shell/",
+        reimbursements.BonusEncashTabShell.as_view(),
+        name="bonus-encash-tab-shell",
     ),
     path(
         "tab-reimbursement/",

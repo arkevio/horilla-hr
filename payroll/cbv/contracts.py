@@ -51,6 +51,14 @@ class ContractsList(HorillaListView):
         "filing_status",
         "wage",
         "contract_status",
+        # A bulk update otherwise applies every field with one raw SQL
+        # UPDATE, which never calls save() -- so this field alone would
+        # assign a structure an employee was never actually added to,
+        # paying nothing. Contract.bulk_update_setters routes it through
+        # set_salary_structure() per contract instead, same as the
+        # Components bulk action and the individual contract form already
+        # do.
+        "salary_structure_id",
     ]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -67,7 +75,7 @@ class ContractsList(HorillaListView):
         (_("Start Date"), "contract_start_date"),
         (_("End Date"), "contract_end_date"),
         (_("Wage Type"), "get_wage_type_display"),
-        (_("Basic Salary"), "wage"),
+        (_("Contract wage"), "wage"),
         (_("Filing Status"), "filing_status"),
         (_("Salary Structure"), "salary_structure_id"),
         (_("Status"), "status_col"),
@@ -84,7 +92,7 @@ class ContractsList(HorillaListView):
         (_("Employee"), "employee_id__get_full_name"),
         (_("Start Date"), "contract_start_date"),
         (_("End Date"), "contract_end_date"),
-        (_("Basic Salary"), "wage"),
+        (_("Contract wage"), "wage"),
         (_("Status"), "status_col"),
     ]
 
@@ -174,6 +182,12 @@ class ContractsNav(HorillaNavView):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.search_url = reverse("contract-filter")
+        self.search_in = [
+            ("employee_id", _("Employee")),
+            ("employee_id__employee_work_info__department_id", _("Department")),
+            ("employee_id__employee_work_info__job_position_id", _("Job Position")),
+            ("employee_id__employee_work_info__company_id", _("Company")),
+        ]
         if self.request.user.has_perm("payroll.add_contract"):
             self.create_attrs = f"""
                             href="#"
@@ -191,7 +205,23 @@ class ContractsNav(HorillaNavView):
                         data-target="#hxContractExport"
                         hx-get="{reverse_lazy('contracts-export')}"
                         hx-target="#hxContractExportForm"
-                        hx-vals='js:{{"has_selection": (JSON.parse(document.getElementById("selectedInstances")?.getAttribute("data-ids")||"[]").length>0)}}'
+                        style="cursor: pointer;"
+                        """,
+                }
+            )
+        if self.request.user.has_perm("payroll.change_contract"):
+            # Components and structures, for the contracts ticked in the list.
+            # hx-vals reads the same #selectedInstances the Export action
+            # above reads, which is how this list already tracks a selection.
+            self.actions.append(
+                {
+                    "action": _("Components"),
+                    "attrs": f"""
+                        data-toggle="oh-modal-toggle"
+                        data-target="#relatedObjectModal"
+                        hx-get="{reverse_lazy('contracts-bulk-components')}"
+                        hx-target="#relatedObjectModalBody"
+                        hx-vals='js:{{"instance_ids": JSON.parse(document.getElementById("selectedInstances")?.getAttribute("data-ids")||"[]")}}'
                         style="cursor: pointer;"
                         """,
                 }
@@ -214,6 +244,11 @@ class ContractsNav(HorillaNavView):
     filter_instance = ContractFilter()
     filter_form_context_name = "form"
     search_swap_target = "#listContainer"
+    # Modern slide-over filter panel (generic/horilla_nav.html's own
+    # {% if modern_filter %} branch) -- same treatment as every other
+    # panel this session. ContractFilter.ajax_fields carries the
+    # AJAX-loaded comboboxes this needs.
+    modern_filter = True
 
     group_by_fields = [
         ("employee_id", _("Employee")),
@@ -254,7 +289,6 @@ class ContractsExportView(TemplateView):
         export_filter = ContractFilter(queryset=conracts)
         context["export_column"] = export_column
         context["export_filter"] = export_filter
-        context["hide_export_filters"] = self.request.GET.get("has_selection") == "true"
         return context
 
 
@@ -270,6 +304,8 @@ class ContractsDetailView(HorillaDetailedView):
         Return context data with the title set to the contract's name.
         """
         context = super().get_context_data(**kwargs)
+        if not self.instance:
+            return context
         contract_name = context["contract"].contract_name
         context["title"] = contract_name
         return context
@@ -285,24 +321,16 @@ class ContractsDetailView(HorillaDetailedView):
         "avatar": "employee_id__get_avatar",
     }
 
+    # One block, which renders its own summary bar and tabs. Fifteen labelled
+    # rows left nowhere to put the components, and the components are what
+    # decide what the wage in row four actually turns into.
     body = [
-        (_("Start Date"), "contract_start_date"),
-        (_("End Date"), "contract_end_date"),
-        (_("Wage Type"), "get_wage_type_display"),
-        (_("Basic Salary"), "wage"),
-        (_("Deduct From Basic Pay"), "deduct_leave_from_basic_pay_col"),
-        (_("Department"), "department"),
-        (_("Job Position"), "job_position"),
-        (_("Job Role"), "job_role"),
-        (_("Shift"), "shift"),
-        (_("Work Type"), "work_type"),
-        (_("Filing Status"), "filing_status"),
-        (_("Salary Structure"), "salary_structure_id"),
-        (_("Pay Frequency"), "get_pay_frequency_display"),
-        (_("Status"), "get_status_display"),
-        (_("Calculate Leave Amount"), "cal_leave_amount", True),
-        (_("Note"), "note_col", True),
-        (_("Document"), "edocument_col", True),
+        (_("Contract"), "get_contract_detail_col", True),
     ]
+
+    cols = {"get_contract_detail_col": 12}
+
+    # Long body, and an action row that must stay reachable while reading it.
+    sticky_chrome = True
 
     action_method = "detail_action"

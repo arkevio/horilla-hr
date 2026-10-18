@@ -7,6 +7,7 @@ from django.http import HttpResponse
 from django.urls import resolve, reverse, reverse_lazy
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 
 from employee.cbv.employee_profile import EmployeeProfileView
 from employee.models import Employee
@@ -17,6 +18,7 @@ from horilla_views.generic.cbv.views import (
     HorillaFormView,
     HorillaListView,
     HorillaNavView,
+    HorillaTabContentShell,
     HorillaTabView,
     TemplateView,
 )
@@ -65,8 +67,8 @@ class ObjectivesList(HorillaListView):
 
         qs = super().get_queryset(queryset, filtered, *args, **kwargs)
 
-        if self.template_only:
-            qs = qs.filter(is_template=True)
+        if not self.template_only:
+            qs = qs.exclude(is_template=True)
 
         if archive_param in ["true", "True", "1"]:
             # only archived
@@ -94,9 +96,9 @@ class ObjectivesList(HorillaListView):
 
     header_attrs = {
         "title_col": 'style="min-width:260px;width:28% !important;"',
-        "manager_col": 'style="width:110px;max-width:130px;"',
+        "manager_col": 'style="width:140px;max-width:150px;"',
         "key_res_col": 'style="width:110px;max-width:130px;"',
-        "assingnees_col": 'style="width:110px;max-width:130px;"',
+        "assingnees_col": 'style="width:140px;max-width:150px;"',
         "duration_col": 'style="width:100px;max-width:120px;"',
         "description": 'style="min-width:180px;width:22%;"',
         "action": 'style="width:160px;"',
@@ -121,8 +123,8 @@ class ObjectivesList(HorillaListView):
         ("title", _("Title")),
         ("duration_unit", _("Duration Unit")),
         ("duration", _("Duration")),
-        ("is_template", _("Is Template")),
-        ("archive", _("Is Archived")),
+        ("is_template", _("Template")),
+        ("archive", _("Archived")),
         ("company_id", _("Company")),
     ]
 
@@ -221,13 +223,15 @@ class ObjectivesTab(HorillaTabView):
         self.view_id = "objContainer"
 
     def _assigned_objectives_count(self, employee):
-        queryset = Objective.objects.filter(
-            employee_objective__employee_id=employee
-        ).distinct()
+        queryset = (
+            Objective.objects.filter(employee_objective__employee_id=employee)
+            .exclude(is_template=True)
+            .distinct()
+        )
         return ActualObjectiveFilter(self.request.GET, queryset=queryset).qs.count()
 
     def _all_objectives_count(self, employee):
-        queryset = Objective.objects.all()
+        queryset = Objective.objects.exclude(is_template=True)
         manager = Objective.objects.filter(managers=employee).exists()
         if self.request.user.has_perm("pms.view_employeeobjective"):
             queryset = queryset.distinct()
@@ -269,22 +273,8 @@ class ObjectivesTab(HorillaTabView):
 
         all_objectives_tab = {
             "title": _("All Objectives"),
-            "url": with_query(reverse("all-objectives-view-tab")),
+            "url": with_query(reverse("all-objectives-tab-shell")),
             "badge": all_objectives_count,
-            "actions": [
-                {
-                    "action": "Create Objectives",
-                    "accessibility": "pms.cbv.accessibility.create_objective_accessibility",
-                    "attrs": f"""
-                        data-toggle="oh-modal-toggle"
-                        hx-get='{reverse_lazy('objective-creation')}'"
-                        data-toggle="oh-modal-toggle"
-                        data-target="#genericModal"
-                        hx-target="#genericModalBody"
-                        style="cursor: pointer;"
-                        """,
-                }
-            ],
         }
 
         if template_mode:
@@ -292,8 +282,8 @@ class ObjectivesTab(HorillaTabView):
         else:
             self.tabs = [
                 {
-                    "title": _("Assigned Objectives"),
-                    "url": with_query(reverse("my-objectives-view-tab")),
+                    "title": _("My Objectives"),
+                    "url": with_query(reverse("my-objectives-tab-shell")),
                     "badge": assigned_objectives_count,
                 },
             ]
@@ -304,47 +294,96 @@ class ObjectivesTab(HorillaTabView):
         return context
 
 
-@method_decorator(login_required, name="dispatch")
-class ObjectivesNav(HorillaNavView):
+class _ObjectivesTabNavBase(HorillaNavView):
     """
-    Nav bar
+    Shared Search/Filter/Create wiring for each Objectives tab's own,
+    independent Nav - only search_url/search_swap_target differ per tab.
     """
+
+    nav_title = _("Employee Objectives")
+    filter_instance = ActualObjectiveFilter()
+    filter_form_context_name = "form"
+    filter_body_template = "cbv/objectives/filter.html"
+    # Modern slide-over filter panel (generic/horilla_nav.html's own
+    # {% if modern_filter %} branch, inherited by ObjectiveTemplateNav's
+    # generic/inline_nav.html too) -- same treatment as every other
+    # panel this session. ActualObjectiveFilter.ajax_fields carries the
+    # AJAX-loaded comboboxes this needs.
+    modern_filter = True
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.search_url = reverse("tab-objectives-view")
+        # The Create button opens "Create Objective" (define a new
+        # objective/OKR, optionally assigning it to employees right away
+        # via its own "Add assignees" toggle) -- that's the single entry
+        # point for this page now, so there's no separate Actions dropdown.
         self.create_attrs = f"""
-                        hx-get='{reverse_lazy('create-employee-objective')}'"
+                        hx-get='{reverse_lazy('objective-creation')}'"
                         data-toggle="oh-modal-toggle"
                         data-target="#genericModal"
                         hx-target="#genericModalBody"
                         """
-
-    nav_title = _("Objectives")
-    filter_instance = ActualObjectiveFilter()
-    filter_form_context_name = "form"
-    filter_body_template = "cbv/objectives/filter.html"
-    search_swap_target = "#listContainer"
 
     # Mirrors ObjectivesList.nested_group_by_fields
     nested_group_by_fields = [
         ("title", _("Title")),
         ("duration_unit", _("Duration Unit")),
         ("duration", _("Duration")),
-        ("is_template", _("Is Template")),
-        ("archive", _("Is Archived")),
+        ("is_template", _("Template")),
+        ("archive", _("Archived")),
         ("company_id", _("Company")),
     ]
 
 
 @method_decorator(login_required, name="dispatch")
-class ObjectiveTemplateNav(ObjectivesNav):
+class MyObjectivesNav(_ObjectivesTabNavBase):
+    """
+    Independent Nav for the My Objectives tab.
+    """
+
+    nav_title = _("My Objectives")
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.search_url = reverse("my-objectives-view-tab")
+        self.search_swap_target = "#myObjectivesListContainer"
+
+
+@method_decorator(login_required, name="dispatch")
+class AllObjectivesNav(_ObjectivesTabNavBase):
+    """
+    Independent Nav for the All Objectives tab.
+    """
+
+    nav_title = _("All Objectives")
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.search_url = reverse("all-objectives-view-tab")
+        self.search_swap_target = "#allObjectivesListContainer"
+
+
+class MyObjectivesTabShell(HorillaTabContentShell):
+    nav_url_name = "my-objectives-nav"
+    container_id = "myObjectivesListContainer"
+    tabs_root_id = "objContainer"
+
+
+class AllObjectivesTabShell(HorillaTabContentShell):
+    nav_url_name = "all-objectives-nav"
+    container_id = "allObjectivesListContainer"
+    tabs_root_id = "objContainer"
+
+
+@method_decorator(login_required, name="dispatch")
+class ObjectiveTemplateNav(_ObjectivesTabNavBase):
     """
     Nav bar for objective template list page
     """
 
     nav_title = _("Objective Templates")
     template_name = "generic/inline_nav.html"
+    search_swap_target = "#listContainer"
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -428,7 +467,7 @@ class CreateObjectiveFormView(HorillaFormView):
 
     form_class = ObjectiveForm
     model = Objective
-    new_display_title = _("Create  Objective")
+    new_display_title = _("Create Employee Objective")
     dynamic_create_fields = [("key_result_id", DynamicKeyResultCreateForm)]
     template_name = "cbv/objectives/form.html"
     force_template = False
@@ -503,11 +542,7 @@ class CreateObjectiveFormView(HorillaFormView):
                     notify.send(
                         self.request.user.employee_get,
                         recipient=emp.employee_user_id,
-                        verb="You got an OKR!.",
-                        verb_ar="لقد حققت هدفًا ونتيجة رئيسية!",
-                        verb_de="Du hast ein Ziel-Key-Ergebnis erreicht!",
-                        verb_es="¡Has logrado un Resultado Clave de Objetivo!",
-                        verb_fr="Vous avez atteint un Résultat Clé d'Objectif !",
+                        verb=gettext_noop("You got an OKR!"),
                         redirect=reverse(
                             "objective-detailed-view", kwargs={"obj_id": objective.id}
                         ),
@@ -536,11 +571,7 @@ class CreateObjectiveFormView(HorillaFormView):
                         notify.send(
                             self.request.user.employee_get,
                             recipient=emp.employee_user_id,
-                            verb="You got an OKR!.",
-                            verb_ar="لقد حققت هدفًا ونتيجة رئيسية!",
-                            verb_de="Du hast ein Ziel-Key-Ergebnis erreicht!",
-                            verb_es="¡Has logrado un Resultado Clave de Objetivo!",
-                            verb_fr="Vous avez atteint un Résultat Clé d'Objectif !",
+                            verb=gettext_noop("You got an OKR!"),
                             redirect=reverse(
                                 "objective-detailed-view",
                                 kwargs={"obj_id": objective.id},
@@ -639,11 +670,7 @@ class AddAssigneesFormView(HorillaFormView):
                     notify.send(
                         self.request.user.employee_get,
                         recipient=emp.employee_user_id,
-                        verb="You got an OKR!.",
-                        verb_ar="لقد حققت هدفًا ونتيجة رئيسية!",
-                        verb_de="Du hast ein Ziel-Key-Ergebnis erreicht!",
-                        verb_es="¡Has logrado un Resultado Clave de Objetivo!",
-                        verb_fr="Vous avez atteint un Résultat Clé d'Objectif !",
+                        verb=gettext_noop("You got an OKR!"),
                         redirect=reverse(
                             "objective-detailed-view", kwargs={"obj_id": objective.id}
                         ),
@@ -685,7 +712,7 @@ class CreateEmployeeKeyResultFormView(HorillaFormView):
             return HorillaRedirect(request)
 
         if not self.has_key_result_permission():
-            messages.info(request, _("You dont have permission"))
+            messages.info(request, _("You don't have permission"))
             return HorillaRedirect(request)
         return super().dispatch(request, *args, **kwargs)
 
@@ -736,11 +763,7 @@ class CreateEmployeeKeyResultFormView(HorillaFormView):
                 notify.send(
                     self.request.user.employee_get,
                     recipient=employee.employee_user_id,
-                    verb="Your Key Result updated.",
-                    verb_ar="تم تحديث نتيجتك الرئيسية.",
-                    verb_de="Ihr Schlüsselergebnis wurde aktualisiert.",
-                    verb_es="Se ha actualizado su Resultado Clave.",
-                    verb_fr="Votre Résultat Clé a été mis à jour.",
+                    verb=gettext_noop("Your Key Result updated."),
                     redirect=reverse(
                         "objective-detailed-view",
                         kwargs={
@@ -760,11 +783,7 @@ class CreateEmployeeKeyResultFormView(HorillaFormView):
                 notify.send(
                     self.request.user.employee_get,
                     recipient=employee.employee_user_id,
-                    verb="You got an Key Result!.",
-                    verb_ar="لقد حصلت على نتيجة رئيسية!",
-                    verb_de="Du hast ein Schlüsselergebnis erreicht!",
-                    verb_es="¡Has conseguido un Resultado Clave!",
-                    verb_fr="Vous avez obtenu un Résultat Clé!",
+                    verb=gettext_noop("You got a Key Result!"),
                     redirect=reverse(
                         "objective-detailed-view",
                         kwargs={"obj_id": emp_objective.objective_id.id},
@@ -832,6 +851,16 @@ class EmployeeObjectiveKeyResultDetailListView(HorillaListView):
     ]
     filter_selected = False
     show_filter_tags = False
+    custom_empty_template = "cbv/objectives/compact_empty.html"
+    # One instance of this view loads per expanded employee row on the
+    # objective detail page (okr/emp_objective/emp_objective_list.html),
+    # which renders ONE header shared by all of them -- see that template's
+    # comment. No per-row bulk-select there either (managing key results one
+    # at a time, from a per-employee accordion, doesn't need it). EKRTab
+    # below (the standalone Key Results profile tab) restores both, since
+    # it's a normal one-off list, not one of several sharing a header.
+    bulk_select_option = False
+    show_header = False
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -846,13 +875,39 @@ class EmployeeObjectiveKeyResultDetailListView(HorillaListView):
             pk=self.request.GET.get("employee_objective_id")
         ).first()
 
+        # Row actions, in this order: History, Edit, Delete.
         self.actions = []
+        if (
+            emp_objective
+            and self.request.user.employee_get
+            in emp_objective.objective_id.managers.all()
+            or self.request.user.has_perm("pms.view_employeekeyresult")
+        ):
+            self.actions.append(
+                {
+                    "action": _("History"),
+                    "icon": "time-outline",
+                    "attrs": """
+                hx-get='{get_history_url}'
+                hx-target="#genericOffCanvas"
+                data-target='#genericSidebar'
+                class="oh-btn oh-btn--light-bkg oh-btn--sq-sm oh-activity-sidebar__open"
+                style="cursor: pointer;"
+                """,
+                }
+            )
         if (
             self.request.user.has_perm("pms.change_objective")
             or self.request.user.has_perm("pms.change_employeeobjective")
             or self.request.user.has_perm("pms.change_employeekeyresult")
-            or self.request.user.employee_get
-            in emp_objective.objective_id.managers.all()
+            # No employee_objective_id in the request (the profile's standalone
+            # Key Results tab lists key results of many objectives): there is no
+            # single objective whose managers to check.
+            or (
+                emp_objective is not None
+                and self.request.user.employee_get
+                in emp_objective.objective_id.managers.all()
+            )
         ):
             self.actions.append(
                 {
@@ -885,36 +940,24 @@ class EmployeeObjectiveKeyResultDetailListView(HorillaListView):
                 }
             )
 
-        if (
-            emp_objective
-            and self.request.user.employee_get
-            in emp_objective.objective_id.managers.all()
-            or self.request.user.has_perm("pms.view_employeekeyresult")
-        ):
-            self.actions.append(
-                {
-                    "action": _("History"),
-                    "icon": "time-outline",
-                    "attrs": """
-                hx-get='{get_history_url}'
-                hx-target="#genericOffCanvas"
-                data-target='#genericSidebar'
-                class="oh-btn oh-btn--light-bkg oh-btn--sq-sm oh-activity-sidebar__open"
-                style="cursor: pointer;"
-                """,
-                }
-            )
-
         context["actions"] = self.actions
         return context
 
+    # Fixed pixel widths, matching okr/emp_objective/emp_objective_list.html's
+    # shared header exactly (both are forced to table-layout:fixed there,
+    # scoped to #emp_objective_card) -- that's what keeps this view's own
+    # (suppressed, see show_header above) header-less table's columns lined
+    # up under the one real header rendered above the whole accordion.
     header_attrs = {
-        "title_col": """
-                      style="width:200px !important;"
-                      """,
-        "action": """
-            style="width:180px !important;"
-        """,
+        "title_col": 'style="width:220px !important;"',
+        "start_value": 'style="width:100px !important;"',
+        "get_current_value_col": 'style="width:130px !important;"',
+        "target_value": 'style="width:100px !important;"',
+        "get_progress_col": 'style="width:140px !important;"',
+        "start_date": 'style="width:110px !important;"',
+        "end_date": 'style="width:110px !important;"',
+        "status_col": 'style="width:160px !important;"',
+        "action": 'style="width:140px !important;"',
     }
     row_attrs = """
                 class = "oh-employee-okr-row"
@@ -939,6 +982,11 @@ class EKRTab(EmployeeObjectiveKeyResultDetailListView):
     EKR tab
     """
 
+    # The parent's compact "no key results for this objective" line suits a row
+    # of an objective accordion, not a whole tab: use the usual empty-page look.
+    custom_empty_template = "cbv/objectives/tab_empty.html"
+
+    show_saved_filters = False
     columns = [
         (_("Title"), "title_col"),
         (_("Objective"), "employee_objective_id__objective_id__title"),
@@ -950,6 +998,12 @@ class EKRTab(EmployeeObjectiveKeyResultDetailListView):
         (_("End Date"), "end_date"),
         (_("Status"), "status"),
     ]
+    # A normal standalone list (the profile's own Key Results tab), not one
+    # of several sharing a header -- restore what the parent class turns off
+    # for its own embedded-in-an-accordion use (see the comment there).
+    bulk_select_option = True
+    show_header = True
+    header_attrs = {}
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)

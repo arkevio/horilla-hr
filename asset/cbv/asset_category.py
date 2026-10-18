@@ -21,7 +21,11 @@ from horilla_views.cbv_methods import (
     login_required,
     permission_required,
 )
-from horilla_views.generic.cbv.views import HorillaFormView, HorillaNavView
+from horilla_views.generic.cbv.views import (
+    HorillaFormView,
+    HorillaListView,
+    HorillaNavView,
+)
 from horilla_views.views import HorillaDeleteConfirmationView
 
 
@@ -58,6 +62,26 @@ class AssetCategoryFormView(HorillaFormView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(permission_required("asset.add_assetcategory"), name="dispatch")
+class DynamicCreateAssetCategory(AssetCategoryFormView):
+    """
+    Creates a category from inside the asset form ("create new" on the Category
+    field). Unlike the category page's own form it must not close the modal or
+    reload the list: it hands the new category back to the select it came from.
+    """
+
+    is_dynamic_create_view = True
+    new_display_title = _("Create Asset Category")
+
+    def form_valid(self, form: AssetCategoryForm) -> HttpResponse:
+        if form.is_valid():
+            form.save()
+            messages.success(self.request, _("Asset category created successfully"))
+            return self.HttpResponse()
+        return super(AssetCategoryFormView, self).form_valid(form)
+
+
+@method_decorator(login_required, name="dispatch")
 @method_decorator(permission_required("asset.add_asset"), name="dispatch")
 class AssetFormView(HorillaFormView):
     """
@@ -67,17 +91,26 @@ class AssetFormView(HorillaFormView):
     form_class = AssetForm
     model = Asset
     new_display_title = _("Asset Creation")
-    dynamic_create_fields = [("asset_lot_number_id", DynamicCreateBatchNo)]
+    # Category and batch number each offer "create new" beside the existing ones, so an
+    # asset can be added without first leaving the form to make its category.
+    dynamic_create_fields = [
+        ("asset_category_id", DynamicCreateAssetCategory),
+        ("asset_lot_number_id", DynamicCreateBatchNo),
+    ]
     template_name = "cbv/asset/asset_form.html"
+
+    def get_initial(self):
+        """Opened from a category's own "add asset" action: that category is pre-selected."""
+        initial = super().get_initial()
+        category_id = self.kwargs.get("asset_category_id")
+        if category_id:
+            initial["asset_category_id"] = category_id
+        return initial
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        asset_category_id = self.kwargs.get("asset_category_id")
-        self.form.fields["asset_category_id"].initial = asset_category_id
         if self.form.instance.pk:
             self.form_class.verbose_name = _("Asset Update")
-        else:
-            self.form.fields["asset_category_id"].widget = forms.HiddenInput()
         return context
 
     def form_valid(self, form: AssetForm) -> HttpResponse:
@@ -211,29 +244,170 @@ class AssetReportFormView(HorillaFormView):
 
 @method_decorator(login_required, name="dispatch")
 @method_decorator(permission_required("asset.view_asset"), name="dispatch")
+class AssetCategoryListView(HorillaListView):
+    """
+    Grouped list view for assets on the Asset Category page.
+
+    Lists every Asset (unlike asset.cbv.asset.AssetListView, which is
+    hard-filtered to one category for the per-category HTMX refresh used by
+    the asset CRUD forms) so the standard HorillaListView group-by engine can
+    group it by category.
+    """
+
+    model = Asset
+    filter_class = AssetFilter
+    view_id = "asset-category-grouped-list"
+    columns = [
+        (_("Asset Name"), "asset_name_display"),
+        (_("Category"), "asset_category_id"),
+        (_("Status"), "asset_status_col"),
+        "asset_tracking_id",
+        "asset_lot_number_id",
+    ]
+    show_filter_tags = True
+    bulk_select_option = True
+    quick_export = True
+    action_method = "action_column"
+    accordian_action = "cbv/asset_category/accordion_actions.html"
+    # The standard nested group-by (the "Grouped by 1 Category > 2 ..." bar every list in
+    # the app uses), over the plain list of assets. Mirrors AssetCategoryNav's own list --
+    # the List and the Nav are separate classes, see leave/cbv/leave_requests.py.
+    nested_group_by_fields = [
+        ("asset_category_id", _("Category")),
+        ("asset_status", _("Status")),
+        ("asset_lot_number_id", _("Batch Number")),
+    ]
+    header_attrs = {
+        "asset_name": "style='width:200px !important;'",
+        "action": "style='width:130px !important;'",
+    }
+
+    row_status_indications = [
+        (
+            "yellow--dot",
+            _("Available"),
+            """
+            onclick="
+                $('#applyFilter').closest('form').find('[name=expired]').val('');
+                $('#applyFilter').closest('form').find('[name=asset_status]').val('Available');
+                $('#applyFilter').click();
+            "
+            """,
+        ),
+        (
+            "blue--dot",
+            _("In Use"),
+            """
+            onclick="
+                $('#applyFilter').closest('form').find('[name=expired]').val('');
+                $('#applyFilter').closest('form').find('[name=asset_status]').val('In use');
+                $('#applyFilter').click();
+            "
+            """,
+        ),
+        (
+            "gray--dot",
+            _("Not Available"),
+            """
+            onclick="
+                $('#applyFilter').closest('form').find('[name=expired]').val('');
+                $('#applyFilter').closest('form').find('[name=asset_status]').val('Not-Available');
+                $('#applyFilter').click();
+            "
+            """,
+        ),
+        (
+            "red--dot",
+            _("Expired"),
+            """
+            onclick="
+                $('#applyFilter').closest('form').find('[name=asset_status]').val('');
+                $('#applyFilter').closest('form').find('[name=expired]').val('true');
+                $('#applyFilter').click();
+            "
+            """,
+        ),
+    ]
+    row_status_class = "{row_status_class}"
+
+    row_attrs = """
+        hx-get='{asset_detail}?instance_ids={ordered_ids}'
+        hx-target="#genericModalBody"
+        data-target="#genericModal"
+        data-toggle="oh-modal-toggle"
+    """
+
+
+@method_decorator(login_required, name="dispatch")
+@method_decorator(permission_required("asset.view_asset"), name="dispatch")
 class AssetCategoryNav(HorillaNavView):
     """
     nav bar for asset category
     """
 
-    nav_title = _("Asset Category")
+    nav_title = _("Asset")
     filter_body_template = "cbv/asset_category/filter.html"
     filter_instance = AssetFilter()
     filter_form_context_name = "form"
     search_swap_target = "#assetCategoryList"
+    # Modern slide-over filter panel (generic/horilla_nav.html's own
+    # {% if modern_filter %} branch) -- same treatment as every other
+    # panel this session. AssetFilter.ajax_fields carries the
+    # AJAX-loaded comboboxes this needs.
+    modern_filter = True
+    # The page opens as the list of assets grouped by Category with the standard nested
+    # group-by: levels can be added, changed or removed from the "Grouped by" bar. It is
+    # built from the full asset list (the same rows the dashboard counts), not from
+    # per-category loads.
+    nested_group_by_fields = [
+        ("asset_category_id", _("Category")),
+        ("asset_status", _("Status")),
+        ("asset_lot_number_id", _("Batch Number")),
+    ]
+    default_group_by = "asset_category_id"
+
+    # Query parameters that are about how the page is laid out, not about what to show.
+    NON_FILTER_PARAMS = {
+        "nested_fields",
+        "field",
+        "page",
+        "dashboard",
+        "filter_applied",
+    }
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.search_url = reverse("asset-category-view-search-filter")
+        self.search_url = reverse("asset-category-list")
+        # Opened with a filter already in the address (the dashboard's KPI cards and charts
+        # link here that way): show just the filtered assets. The default grouping is for
+        # opening the page on its own.
+        if any(
+            self.request.GET.get(key)
+            for key in self.request.GET
+            if key not in self.NON_FILTER_PARAMS
+        ):
+            self.default_group_by = ""
         self.actions = []
-        if self.request.user.has_perm("asset.add_assetcategory"):
+        if self.request.user.has_perm("asset.add_asset"):
             self.create_attrs = f"""
+                            data-toggle="oh-modal-toggle"
+                            data-target="#genericModal"
+                            hx-get="{reverse('asset-creation-new')}"
+                            hx-target="#genericModalBody"
+                            """
+        if self.request.user.has_perm("asset.add_assetcategory"):
+            self.actions.append(
+                {
+                    "action": _("Create Category"),
+                    "attrs": f"""
                             data-toggle="oh-modal-toggle"
                             data-target="#genericModal"
                             hx-get="{reverse('asset-category-creation')}"
                             hx-target="#genericModalBody"
-                            """
-        if self.request.user.has_perm("asset.add_assetcategory"):
+                            style="cursor: pointer;"
+                        """,
+                },
+            )
             self.actions.append(
                 {
                     "action": _("Import"),
@@ -263,7 +437,6 @@ class AssetCategoryNav(HorillaNavView):
             )
 
 
-@method_decorator(hx_request_required, name="dispatch")
 class AssetDeleteConfirmationView(HorillaDeleteConfirmationView):
     generic_delete_url_name = "generic-delete-asset-category"
 

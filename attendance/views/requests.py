@@ -16,6 +16,7 @@ from django.shortcuts import redirect, render
 from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 from django.views.decorators.http import require_http_methods
 
 from attendance.filters import AttendanceFilters, AttendanceRequestReGroup
@@ -25,12 +26,7 @@ from attendance.forms import (
     BulkAttendanceRequestForm,
     NewRequestForm,
 )
-from attendance.methods.utils import (
-    get_diff_dict,
-    get_employee_last_name,
-    paginator_qry,
-    shift_schedule_today,
-)
+from attendance.methods.utils import get_diff_dict, paginator_qry, shift_schedule_today
 from attendance.models import (
     Attendance,
     AttendanceActivity,
@@ -54,7 +50,7 @@ from horilla.decorators import (
     manager_can_enter,
     permission_required,
 )
-from horilla.http.response import HorillaRedirect
+from horilla.http.response import HorillaRedirect, with_bulk_result
 from notifications.signals import notify
 
 
@@ -380,21 +376,16 @@ def attendance_request_changes(request, attendance_id):
                 reporting_manager = (
                     attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
                 )
-                user_last_name = get_employee_last_name(attendance)
                 notify.send(
                     request.user,
                     recipient=reporting_manager,
-                    verb=f"{employee.employee_first_name} {user_last_name}'s\
-                          attendance update request for {attendance.attendance_date} is created",
-                    verb_ar=f"تم إنشاء طلب تحديث الحضور لـ {employee.employee_first_name} \
-                        {user_last_name }في {attendance.attendance_date}",
-                    verb_de=f"Die Anfrage zur Aktualisierung der Anwesenheit von \
-                        {employee.employee_first_name} {user_last_name} \
-                            für den {attendance.attendance_date} wurde erstellt",
-                    verb_es=f"Se ha creado la solicitud de actualización de asistencia para {employee.employee_first_name}\
-                          {user_last_name} el {attendance.attendance_date}",
-                    verb_fr=f"La demande de mise à jour de présence de {employee.employee_first_name}\
-                          {user_last_name} pour le {attendance.attendance_date} a été créée",
+                    verb=gettext_noop(
+                        "%(employee_name)s's attendance update request for %(attendance_date)s is created"
+                    ),
+                    verb_params={
+                        "employee_name": str(employee.get_full_name()),
+                        "attendance_date": str(attendance.attendance_date),
+                    },
                     redirect=reverse("request-attendance-view")
                     + f"?id={attendance.id}",
                     icon="checkmark-circle-outline",
@@ -437,7 +428,7 @@ def validate_attendance_request(request, attendance_id):
         other_dict = first_dict
         first_dict = empty_data
     else:
-        requested_data = attendance.requested_data
+        requested_data = attendance.requested_data or {}
         other_dict = (
             requested_data
             if isinstance(requested_data, dict)
@@ -544,16 +535,10 @@ def approve_validate_attendance_request(request, attendance_id):
     notify.send(
         request.user,
         recipient=employee.employee_user_id,
-        verb=f"Your attendance request for \
-            {attendance.attendance_date} is validated",
-        verb_ar=f"تم التحقق من طلب حضورك في تاريخ \
-            {attendance.attendance_date}",
-        verb_de=f"Ihr Anwesenheitsantrag für das Datum \
-            {attendance.attendance_date} wurde bestätigt",
-        verb_es=f"Se ha validado su solicitud de asistencia \
-            para la fecha {attendance.attendance_date}",
-        verb_fr=f"Votre demande de présence pour la date \
-            {attendance.attendance_date} est validée",
+        verb=gettext_noop(
+            "Your attendance request for %(attendance_date)s is validated"
+        ),
+        verb_params={"attendance_date": str(attendance.attendance_date)},
         redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
         icon="checkmark-circle-outline",
     )
@@ -561,20 +546,16 @@ def approve_validate_attendance_request(request, attendance_id):
         reporting_manager = (
             attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
         )
-        user_last_name = get_employee_last_name(attendance)
         notify.send(
             request.user,
             recipient=reporting_manager,
-            verb=f"{employee.employee_first_name} {user_last_name}'s\
-                  attendance request for {attendance.attendance_date} is validated",
-            verb_ar=f"تم التحقق من طلب الحضور لـ {employee.employee_first_name} \
-                {user_last_name} في {attendance.attendance_date}",
-            verb_de=f"Die Anwesenheitsanfrage von {employee.employee_first_name} \
-                {user_last_name} für den {attendance.attendance_date} wurde validiert",
-            verb_es=f"Se ha validado la solicitud de asistencia de \
-                {employee.employee_first_name} {user_last_name} para el {attendance.attendance_date}",
-            verb_fr=f"La demande de présence de {employee.employee_first_name} \
-                {user_last_name} pour le {attendance.attendance_date} a été validée",
+            verb=gettext_noop(
+                "%(employee_name)s's attendance request for %(attendance_date)s is validated"
+            ),
+            verb_params={
+                "employee_name": str(employee.get_full_name()),
+                "attendance_date": str(attendance.attendance_date),
+            },
             redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
             icon="checkmark-circle-outline",
         )
@@ -629,11 +610,10 @@ def cancel_attendance_request(request, attendance_id):
             notify.send(
                 request.user,
                 recipient=employee.employee_user_id,
-                verb=f"Your attendance request for {attendance.attendance_date} is rejected",
-                verb_ar=f"تم رفض طلبك للحضور في تاريخ {attendance.attendance_date}",
-                verb_de=f"Ihre Anwesenheitsanfrage für {attendance.attendance_date} wurde abgelehnt",
-                verb_es=f"Tu solicitud de asistencia para el {attendance.attendance_date} ha sido rechazada",
-                verb_fr=f"Votre demande de présence pour le {attendance.attendance_date} est rejetée",
+                verb=gettext_noop(
+                    "Your attendance request for %(attendance_date)s is rejected"
+                ),
+                verb_params={"attendance_date": str(attendance.attendance_date)},
                 icon="close-circle-outline",
                 redirect=reverse("request-attendance-view"),
             )
@@ -707,14 +687,20 @@ def bulk_approve_attendance_request(request):
     """
     ids = json.loads(request.POST.get("ids", "[]"))
     filtered_ids = []
+    if not ids and len(ids) <= 0:
+        messages.error(request, _("No attendance request selected"))
+        return redirect(reverse("request-attendance-view"))
+    done = 0
     for attendance_id in ids:
-        attendance = Attendance.objects.get(id=attendance_id)
-        if attendance.employee_id != request.user.employee_get:
+        attendance = Attendance.objects.filter(id=attendance_id).first()
+        if attendance and attendance.employee_id != request.user.employee_get:
             filtered_ids.append(attendance_id)
     if request.user.is_superuser:
         filtered_ids = ids
     for attendance_id in filtered_ids:
-        attendance = Attendance.objects.get(id=attendance_id)
+        attendance = Attendance.objects.filter(id=attendance_id).first()
+        if attendance is None or not attendance.is_validate_request:
+            continue  # missing, or already approved / rejected
         prev_attendance_date = attendance.attendance_date
         prev_attendance_clock_in_date = attendance.attendance_clock_in_date
         prev_attendance_clock_in = attendance.attendance_clock_in
@@ -782,21 +768,16 @@ def bulk_approve_attendance_request(request):
                 shift=shift,
             )
 
+        done += 1
         messages.success(request, _("Attendance request has been approved"))
         employee = attendance.employee_id
         notify.send(
             request.user,
             recipient=employee.employee_user_id,
-            verb=f"Your attendance request for \
-                {attendance.attendance_date} is validated",
-            verb_ar=f"تم التحقق من طلب حضورك في تاريخ \
-                {attendance.attendance_date}",
-            verb_de=f"Ihr Anwesenheitsantrag für das Datum \
-                {attendance.attendance_date} wurde bestätigt",
-            verb_es=f"Se ha validado su solicitud de asistencia \
-                para la fecha {attendance.attendance_date}",
-            verb_fr=f"Votre demande de présence pour la date \
-                {attendance.attendance_date} est validée",
+            verb=gettext_noop(
+                "Your attendance request for %(attendance_date)s is validated"
+            ),
+            verb_params={"attendance_date": str(attendance.attendance_date)},
             redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
             icon="checkmark-circle-outline",
         )
@@ -804,24 +785,24 @@ def bulk_approve_attendance_request(request):
             reporting_manager = (
                 attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
             )
-            user_last_name = get_employee_last_name(attendance)
             notify.send(
                 request.user,
                 recipient=reporting_manager,
-                verb=f"{employee.employee_first_name} {user_last_name}'s\
-                    attendance request for {attendance.attendance_date} is validated",
-                verb_ar=f"تم التحقق من طلب الحضور لـ {employee.employee_first_name} \
-                    {user_last_name} في {attendance.attendance_date}",
-                verb_de=f"Die Anwesenheitsanfrage von {employee.employee_first_name} \
-                    {user_last_name} für den {attendance.attendance_date} wurde validiert",
-                verb_es=f"Se ha validado la solicitud de asistencia de \
-                    {employee.employee_first_name} {user_last_name} para el {attendance.attendance_date}",
-                verb_fr=f"La demande de présence de {employee.employee_first_name} \
-                    {user_last_name} pour le {attendance.attendance_date} a été validée",
+                verb=gettext_noop(
+                    "%(employee_name)s's attendance request for %(attendance_date)s is validated"
+                ),
+                verb_params={
+                    "employee_name": str(employee.get_full_name()),
+                    "attendance_date": str(attendance.attendance_date),
+                },
                 redirect=reverse("request-attendance-view") + f"?id={attendance.id}",
                 icon="checkmark-circle-outline",
             )
-    return HttpResponse("success")
+    # Everything selected that wasn't approved (missing, own request, already
+    # processed) counts as failed. The browser shows these counts in a result
+    # dialog instead of the per-record toasts.
+    failed = max(len(set(map(str, ids))) - done, 0)
+    return with_bulk_result(HttpResponse("success"), done, failed)
 
 
 @login_required
@@ -831,9 +812,15 @@ def bulk_reject_attendance_request(request):
     This method is used to delete bulk attendance request
     """
     ids = json.loads(request.POST.get("ids", "[]"))
+    if not ids and len(ids) <= 0:
+        messages.error(request, _("No attendance request selected"))
+        return redirect(reverse("request-attendance-view"))
+    done = 0
     for attendance_id in ids:
         try:
             attendance = Attendance.objects.get(id=attendance_id)
+            if not attendance.is_validate_request:
+                continue  # already approved / rejected
             if (
                 attendance.employee_id.employee_user_id == request.user
                 or is_reportingmanager(request)
@@ -852,22 +839,23 @@ def bulk_reject_attendance_request(request):
                     messages.success(
                         request, _("The requested attendance is rejected.")
                     )
+                done += 1
                 employee = attendance.employee_id
                 notify.send(
                     request.user,
                     recipient=employee.employee_user_id,
-                    verb=f"Your attendance request for {attendance.attendance_date} is rejected",
-                    verb_ar=f"تم رفض طلبك للحضور في تاريخ {attendance.attendance_date}",
-                    verb_de=f"Ihre Anwesenheitsanfrage für {attendance.attendance_date} wurde abgelehnt",
-                    verb_es=f"Tu solicitud de asistencia para el {attendance.attendance_date} ha sido rechazada",
-                    verb_fr=f"Votre demande de présence pour le {attendance.attendance_date} est rejetée",
+                    verb=gettext_noop(
+                        "Your attendance request for %(attendance_date)s is rejected"
+                    ),
+                    verb_params={"attendance_date": str(attendance.attendance_date)},
                     icon="close-circle-outline",
                     redirect=reverse("request-attendance-view")
                     + f"?id={attendance.id}",
                 )
         except (Attendance.DoesNotExist, OverflowError):
             messages.error(request, _("Attendance request not found"))
-    return HttpResponse("success")
+    failed = max(len(set(map(str, ids))) - done, 0)
+    return with_bulk_result(HttpResponse("success"), done, failed)
 
 
 @login_required
@@ -910,20 +898,20 @@ def edit_validate_attendance(request, attendance_id):
                 instance.save()
             return HttpResponse(
                 f"""
-                                <script>
-                                $('#editValidateAttendanceRequest').removeClass('oh-modal--show');
-                                $('[data-target="#validateAttendanceRequest"][data-attendance-id={attendance.id}]').click();
-                                $('#messages').html(
-                                `
+                    <script>
+                        $('#editValidateAttendanceRequest').removeClass('oh-modal--show');
+                        $('[data-target="#validateAttendanceRequest"][data-attendance-id={attendance.id}]').click();
+                        $('#messages').html(
+                            `
                                 <div class="oh-alert-container">
-                                <div class="oh-alert oh-alert--animated oh-alert--success">
-                                Attendance request updated.
+                                    <div class="oh-alert oh-alert--animated oh-alert--success">
+                                        Attendance request updated.
+                                    </div>
                                 </div>
-                                </div>
-                                `
-                                )
-                                </script>
-                                """
+                            `
+                        )
+                    </script>
+                """
             )
     return render(
         request,

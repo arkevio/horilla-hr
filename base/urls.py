@@ -1,6 +1,7 @@
 from django.contrib.auth.models import Group
 from django.urls import path, re_path
 from django.utils.translation import gettext_lazy as _
+from django.views.generic import RedirectView
 
 from base import announcement
 from base import dashboard as dashboard_module
@@ -67,6 +68,16 @@ from horilla_audit.models import AuditTag
 urlpatterns = [
     path("", views.home, name="home-page"),
     path("dashboard/", dashboard_module.main_dashboard_view, name="dashboard"),
+    path(
+        "dashboard/api/ticket-priority/",
+        dashboard_module.dashboard_ticket_priority,
+        name="dashboard-ticket-priority",
+    ),
+    path(
+        "dashboard/api/overdue-tickets/",
+        dashboard_module.dashboard_overdue_tickets,
+        name="dashboard-overdue-tickets",
+    ),
     path(
         "dashboard/api/kpi/",
         dashboard_module.dashboard_kpi_data,
@@ -198,36 +209,50 @@ urlpatterns = [
         name="dashboard-dismiss-setup-checklist",
     ),
     # ── ESS Dashboard ──────────────────────────────────────────────────────────
-    path("ess/", ess_dashboard.ess_dashboard, name="ess-dashboard"),
-    path("ess/api/kpi/", ess_dashboard.ess_kpi_data, name="ess-kpi-data"),
+    path("my-dashboard/", ess_dashboard.ess_dashboard, name="ess-dashboard"),
+    # Old bookmarks of the My Dashboard page
+    path("ess/", RedirectView.as_view(pattern_name="ess-dashboard")),
+    path("my-dashboard/api/kpi/", ess_dashboard.ess_kpi_data, name="ess-kpi-data"),
     path(
-        "ess/api/leave-balance/",
+        "my-dashboard/api/leave-balance/",
         ess_dashboard.ess_leave_balance,
         name="ess-leave-balance",
     ),
     path(
-        "ess/api/leave-requests/",
+        "my-dashboard/api/leave-requests/",
         ess_dashboard.ess_leave_requests,
         name="ess-leave-requests",
     ),
     path(
-        "ess/api/attendance-calendar/",
+        "my-dashboard/api/monthly-summary/",
+        ess_dashboard.ess_monthly_summary,
+        name="ess-monthly-summary",
+    ),
+    path(
+        "my-dashboard/api/attendance-calendar/",
         ess_dashboard.ess_attendance_calendar,
         name="ess-attendance-calendar",
     ),
     path(
-        "ess/api/work-hours-week/",
-        ess_dashboard.ess_work_hours_week,
-        name="ess-work-hours-week",
+        "my-dashboard/api/work-hours-month/",
+        ess_dashboard.ess_work_hours_month,
+        name="ess-work-hours-month",
     ),
-    path("ess/api/payslips/", ess_dashboard.ess_payslips, name="ess-payslips"),
-    path("ess/api/objectives/", ess_dashboard.ess_objectives, name="ess-objectives"),
+    path("my-dashboard/api/payslips/", ess_dashboard.ess_payslips, name="ess-payslips"),
     path(
-        "ess/api/announcements/",
+        "my-dashboard/api/objectives/",
+        ess_dashboard.ess_objectives,
+        name="ess-objectives",
+    ),
+    path(
+        "my-dashboard/api/announcements/",
         ess_dashboard.ess_announcements,
         name="ess-announcements",
     ),
-    path("ess/api/upcoming/", ess_dashboard.ess_upcoming, name="ess-upcoming"),
+    path("my-dashboard/api/upcoming/", ess_dashboard.ess_upcoming, name="ess-upcoming"),
+    path(
+        "my-dashboard/api/birthdays/", ess_dashboard.ess_birthdays, name="ess-birthdays"
+    ),
     path(
         "employee/work-type-request-view/",
         work_type_request.WorkRequestView.as_view(),
@@ -284,9 +309,29 @@ urlpatterns = [
         name="employee-worktype-tab-list",
     ),
     path(
+        "employee-worktype-tab-shell/<int:pk>/",
+        work_shift_tab.WorkTypeIndividualTabShell.as_view(),
+        name="employee-worktype-tab-shell",
+    ),
+    path(
+        "employee-worktype-tab-nav/<int:pk>/",
+        work_shift_tab.WorkTypeIndividualNav.as_view(),
+        name="employee-worktype-tab-nav",
+    ),
+    path(
         "employee-rotating-work-tab-list/<int:pk>/",
         work_shift_tab.RotatingWorkIndividualTab.as_view(),
         name="employee-rotating-work-tab-list",
+    ),
+    path(
+        "employee-rotating-work-tab-shell/<int:pk>/",
+        work_shift_tab.RotatingWorkIndividualTabShell.as_view(),
+        name="employee-rotating-work-tab-shell",
+    ),
+    path(
+        "employee-rotating-work-tab-nav/<int:pk>/",
+        work_shift_tab.RotatingWorkIndividualNav.as_view(),
+        name="employee-rotating-work-tab-nav",
     ),
     path(
         "individual-work-rotating-detail-view/<int:pk>/",
@@ -1731,9 +1776,44 @@ urlpatterns = [
         name="shift-request-individual-tab-view",
     ),
     path(
+        "shift-request-individual-tab-shell/<int:pk>/",
+        work_shift_tab.ShiftRequestIndividualTabShell.as_view(),
+        name="shift-request-individual-tab-shell",
+    ),
+    path(
+        "shift-request-individual-tab-nav/<int:pk>/",
+        work_shift_tab.ShiftRequestIndividualNav.as_view(),
+        name="shift-request-individual-tab-nav",
+    ),
+    path(
+        "shift-allocation-individual-tab-view/<int:pk>/",
+        work_shift_tab.ShiftAllocationIndividualTabView.as_view(),
+        name="shift-allocation-individual-tab-view",
+    ),
+    path(
+        "shift-allocation-individual-tab-shell/<int:pk>/",
+        work_shift_tab.ShiftAllocationIndividualTabShell.as_view(),
+        name="shift-allocation-individual-tab-shell",
+    ),
+    path(
+        "shift-allocation-individual-tab-nav/<int:pk>/",
+        work_shift_tab.ShiftAllocationIndividualNav.as_view(),
+        name="shift-allocation-individual-tab-nav",
+    ),
+    path(
         "rotating-shift-individual-tab-view/<int:pk>/",
         work_shift_tab.RotatingShiftAssignIndividualView.as_view(),
         name="rotating-shift-individual-tab-view",
+    ),
+    path(
+        "rotating-shift-individual-tab-shell/<int:pk>/",
+        work_shift_tab.RotatingShiftIndividualTabShell.as_view(),
+        name="rotating-shift-individual-tab-shell",
+    ),
+    path(
+        "rotating-shift-individual-tab-nav/<int:pk>/",
+        work_shift_tab.RotatingShiftIndividualNav.as_view(),
+        name="rotating-shift-individual-tab-nav",
     ),
     path(
         "rotating-shift-individual-detail-view/<int:pk>/",
@@ -1866,14 +1946,9 @@ urlpatterns = [
         name="get-upcoming-holidays",
     ),
     path(
-        "duplicate-holiday/<int:obj_id>/",
-        views.object_duplicate,
+        "duplicate-holiday/<int:pk>/",
+        holidays.HolidayDuplicateFormView.as_view(),
         name="duplicate-holiday",
-        kwargs={
-            "model": Holidays,
-            "form": HolidayForm,
-            "template": "holiday/holiday_form.html",
-        },
     ),
     path("holiday-delete/<int:obj_id>/", views.holiday_delete, name="holiday-delete"),
     path(

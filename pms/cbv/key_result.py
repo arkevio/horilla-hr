@@ -16,6 +16,7 @@ from django.views import View
 
 from base.methods import closest_numbers
 from horilla.decorators import manager_can_enter
+from horilla.http.response import HorillaRedirect
 from horilla_views.cbv_methods import login_required, permission_required
 from horilla_views.generic.cbv.history import HorillaHistoryView
 from horilla_views.generic.cbv.views import (
@@ -83,14 +84,18 @@ class KeyResultNavView(HorillaNavView):
     filter_body_template = "cbv/key_results/key_result_filter.html"
     filter_form_context_name = "form"
     search_swap_target = "#listContainer"
+    # Modern slide-over filter panel (generic/horilla_nav.html's own
+    # {% if modern_filter %} branch) -- same treatment as every other
+    # panel this session. ActualKeyResultFilter.ajax_fields carries the
+    # AJAX-loaded Company combobox this needs.
+    modern_filter = True
 
     # Mirrors KeyResultsListView.nested_group_by_fields
     nested_group_by_fields = [
-        ("title", _("Key Results")),
         ("progress_type", _("Progress Type")),
         ("target_value", _("Target Value")),
         ("duration", _("Duration")),
-        ("archive", _("Is Archived")),
+        ("archive", _("Archived")),
         ("company_id", _("Company")),
     ]
 
@@ -138,11 +143,10 @@ class KeyResultsListView(HorillaListView):
     # Nav are separate classes/templates (see employee/cbv/employees.py's
     # EmployeesList/EmployeeNav for the same split).
     nested_group_by_fields = [
-        ("title", _("Key Results")),
         ("progress_type", _("Progress Type")),
         ("target_value", _("Target Value")),
         ("duration", _("Duration")),
-        ("archive", _("Is Archived")),
+        ("archive", _("Archived")),
         ("company_id", _("Company")),
     ]
 
@@ -206,9 +210,9 @@ class KeyResultCardView(HorillaCardView):
             "attrs": """
                     class="oh-dropdown__link"
                     hx-get='{get_update_url}?instance_ids={ordered_ids}'
-			        hx-target="#genericModalBody"
-			        data-toggle="oh-modal-toggle"
-			        data-target="#genericModal"
+                    hx-target="#genericModalBody"
+                    data-toggle="oh-modal-toggle"
+                    data-target="#genericModal"
             """,
         },
         {
@@ -311,10 +315,11 @@ class DeleteKeyResults(View):
     Handle deletion of key results.
     """
 
-    def post(self, request, key_id):
+    def post(self, request, *args, **kwargs):
         """
         Handle POST request to delete an action type.
         """
+        key_id = kwargs.get("key_id")
 
         instances_ids = request.GET.get("instances_ids")
         next_instance = None
@@ -323,18 +328,28 @@ class DeleteKeyResults(View):
             instances_list = json.loads(instances_ids)
             previous_instance, next_instance = closest_numbers(instances_list, key_id)
             instances_list.remove(key_id)
-        key_result = KeyResult.objects.get(id=key_id)
+        key_result = KeyResult.objects.filter(id=key_id).first()
         if key_result:
             key_result.delete()
             messages.success(request, _("Ket result  deleted successfully!"))
 
         else:
             messages.error(request, _("Key result not found"))
+
+        if next_instance is None:
+            # No "next" key result to navigate to (no instances_ids provided,
+            # or the deleted one was the last in the list) -- fall back to a
+            # safe redirect instead of building a URL with "None" in it.
+            return HorillaRedirect(request)
+
         paths = {
             "genericModalBody": f"/pms/key-result-detail-view/{next_instance}?instance_ids={instances_list}&deleted=true",
         }
         http_hx_target = self.request.META.get("HTTP_HX_TARGET")
-        redirected_path = paths.get(http_hx_target)
+        redirected_path = paths.get(
+            http_hx_target,
+            f"/pms/key-result-detail-view/{next_instance}?instance_ids={instances_list}&deleted=true",
+        )
         return redirect(redirected_path)
 
 
@@ -351,3 +366,8 @@ class EKRHistory(HorillaHistoryView):
         self.has_perm_to_revert = self.request.user.has_perm(
             "pms.change_employeekeyresult"
         )
+
+    def history_owner(self, instance):
+        # A key result belongs to the employee who owns its objective.
+        objective = getattr(instance, "employee_objective_id", None)
+        return getattr(objective, "employee_id", None)

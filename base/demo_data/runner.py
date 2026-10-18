@@ -16,6 +16,7 @@ from base.demo_data.modules.asset_expansion import backfill_company_asset_pools
 from base.demo_data.modules.asset_features import backfill_asset_reports
 from base.demo_data.modules.attendance_trend import (
     backfill_attendance_activities,
+    backfill_attendance_density,
     backfill_attendance_overtime,
     backfill_attendance_spread,
     backfill_pending_validation_today,
@@ -25,6 +26,9 @@ from base.demo_data.modules.attendance_trend import (
 from base.demo_data.modules.date_clamp import clamp_demo_dates
 from base.demo_data.modules.employee_features import backfill_employee_feature_coverage
 from base.demo_data.modules.employee_lifecycle import backfill_employee_lifecycle
+from base.demo_data.modules.employee_work_history import (
+    backfill_employee_work_info_history,
+)
 from base.demo_data.modules.helpdesk_expansion import backfill_company_helpdesk_lookups
 from base.demo_data.modules.helpdesk_trend import (
     backfill_helpdesk_tickets,
@@ -39,21 +43,26 @@ from base.demo_data.modules.offboarding_expansion import (
 )
 from base.demo_data.modules.offboarding_trend import backfill_offboarding_letters
 from base.demo_data.modules.onboarding_trend import backfill_onboarding_pipeline
-from base.demo_data.modules.payroll_features import backfill_payroll_feature_coverage
-from base.demo_data.modules.payroll_trend import backfill_payroll_coverage
+from base.demo_data.modules.payroll_precise import backfill_precise_payroll
 from base.demo_data.modules.pms_trend import (
     backfill_pms_coverage,
     backfill_pms_objectives,
 )
 from base.demo_data.modules.project_trend import (
     backfill_project_trend,
+    backfill_task_deadlines,
     reanchor_project_scenarios,
 )
 from base.demo_data.modules.recruitment import seed_recruitment_catalog
 from base.demo_data.modules.recruitment_expansion import (
     backfill_company_recruitment_pipelines,
 )
-from base.demo_data.modules.recruitment_features import backfill_rejected_candidates
+from base.demo_data.modules.recruitment_features import (
+    backfill_candidate_offer_status,
+    backfill_candidate_source,
+    backfill_recruitment_job_position,
+    backfill_rejected_candidates,
+)
 from base.demo_data.modules.request_windows import backfill_request_windows
 from base.demo_data.org import (
     differentiate_org_taxonomy_by_company,
@@ -106,6 +115,10 @@ def run_enterprise_demo_seeder(
     result["attendance_zero_coverage_backfill"] = backfill_zero_coverage_attendance(
         today
     )
+    # Tops up everyone (including the just-covered employees above) to a
+    # realistic shift-aware density -- must run after zero-coverage fill and
+    # before leave spread finalizes leave dates below.
+    result["attendance_density_backfill"] = backfill_attendance_density(today)
     result["leave_backfill"] = backfill_leave_spread(today)
     result["leave_zero_coverage_backfill"] = backfill_zero_coverage_available_leave(
         today
@@ -114,6 +127,7 @@ def run_enterprise_demo_seeder(
     result["employee_lifecycle"] = employee_lifecycle
     result["project_backfill"] = backfill_project_trend(today)
     result["project_scenarios_reanchor"] = reanchor_project_scenarios(today)
+    result["project_task_deadlines"] = backfill_task_deadlines(today)
     result["onboarding_backfill"] = backfill_onboarding_pipeline(today)
     result["offboarding_backfill"] = backfill_offboarding_letters(
         today, employee_lifecycle.get("exit_employee_ids")
@@ -130,20 +144,21 @@ def run_enterprise_demo_seeder(
     result["helpdesk_backfill"] = backfill_helpdesk_tickets(today)
     result["helpdesk_scenarios_reanchor"] = reanchor_helpdesk_scenarios(today)
 
-    # Assign SalaryStructure/FilingStatus to a handful of contracts per
-    # company *before* creating any new demo payslips below, so a
-    # newly-backfilled payslip is never computed against a contract whose
-    # tax/salary-structure FKs are still unset.
-    result["payroll_feature_coverage"] = backfill_payroll_feature_coverage(today)
-
-    # Depends on Contract (fixtures, already loaded) and Attendance (just
-    # backfilled above) for its per-employee day-count computation.
-    result["payroll_coverage_backfill"] = backfill_payroll_coverage(today)
+    # A small, dedicated set of employees per company with attendance stated
+    # outright and payslips verified to reconcile against it -- replaces the
+    # broad roster's own contracts/payslips (backfill_payroll_feature_coverage /
+    # backfill_payroll_coverage), which depended on attendance_trend.py's
+    # backfill reconciling cleanly for every employee it touched, and for some
+    # it didn't (see payroll_precise.py's module docstring).
+    result["precise_payroll"] = backfill_precise_payroll(today)
 
     result["recruitment_company_pipelines"] = backfill_company_recruitment_pipelines(
         today
     )
     result["recruitment_rejected_candidates"] = backfill_rejected_candidates(today)
+    result["recruitment_candidate_source"] = backfill_candidate_source(today)
+    result["recruitment_job_position"] = backfill_recruitment_job_position(today)
+    result["recruitment_offer_status"] = backfill_candidate_offer_status(today)
     result["asset_company_pools"] = backfill_company_asset_pools(today)
     result["asset_reports"] = backfill_asset_reports(today)
 
@@ -151,6 +166,7 @@ def run_enterprise_demo_seeder(
     # read-receipts, multi-level approval managers) that ship with zero
     # demo rows connecting them to anything.
     result["employee_feature_coverage"] = backfill_employee_feature_coverage(today)
+    result["employee_work_info_history"] = backfill_employee_work_info_history(today)
     result["request_windows"] = backfill_request_windows(today)
     result["attendance_leave_reconcile"] = reconcile_attendance_with_leave(today)
     result["attendance_activities"] = backfill_attendance_activities(today)

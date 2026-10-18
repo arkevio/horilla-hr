@@ -1,3 +1,4 @@
+import logging
 import re
 import uuid
 from urllib.parse import urlparse
@@ -12,6 +13,8 @@ from django.utils.translation import gettext_lazy as _
 from base.context_processors import white_labelling_company
 from employee.models import Employee
 from horilla.urls import urlpatterns
+
+logger = logging.getLogger(__name__)
 
 # Final path segment that looks like a file, e.g. "logo.png", "app.min.js.map".
 _FILE_SEGMENT = re.compile(r"\.[A-Za-z0-9]{1,5}$")
@@ -93,8 +96,16 @@ def _resolve_menu_section(path, menus):
     return None
 
 
+def sync_session_ids(request, key, queryset):
+    ids = list(queryset.order_by("id").values_list("id", flat=True))
+    if request.session.get(key) != ids:
+        request.session[key] = ids
+
+
 BREADCRUMB_URL_NAMES = {
-    "monthly-summary": _("Monthly Summary"),
+    "monthly-summary": "Monthly Summary",
+    "my-dashboard": _("My Dashboard"),
+    "candidate-tasks-view": _("Candidate Tasks View"),
     "ess": "Employee",
     "offboarding": "Offboarding",
     "helpdesk": "Helpdesk",
@@ -109,6 +120,22 @@ BREADCRUMB_URL_NAMES = {
     "performance-settings-view": "Configuration",
     "user-group-view": "Roles and Permissions",
     "employee-permission-assign": "Roles and Permissions",
+    "payroll-runs": _("Payroll Runs"),
+    "employee-view-update": _("Employees"),
+    "components": _("Pay Components"),
+    "compensation-templates": _("Pay Structures"),
+    "wage-bases": _("Wage Bases"),
+    "statutory-rules": _("Statutory Rules"),
+    "settings": _("Payroll Settings"),
+    "employee-compensation": _("Employee Compensation"),
+    "loans": _("Loans, Advances & Fines"),
+    "reimbursements": _("Reimbursements"),
+    "generate": _("Generate"),
+    "create": _("Create"),
+    "update": _("Update"),
+    "configuration": _("Configuration"),
+    "standard": "Standard Reports",
+    "explorer": "Explorer",
 }
 
 sidebar_urls = [
@@ -143,7 +170,6 @@ sidebar_urls = [
     "late-come-early-out-view",
     "view-my-attendance",
     "leave-dashboard",
-    "leave-employee-dashboard",
     "user-leave",
     "user-request-view",
     "leave-allocation-request-view",
@@ -292,12 +318,22 @@ remove_urls = [
     "get-job-positions",
     "task-view",
     "dashboard",
+    "login",
 ]
 
 user_breadcrumbs = {}
 
 
-def breadcrumbs(request):
+def breadcrumbs_legacy(request):
+    """
+    Legacy session-accumulated breadcrumb trail.
+
+    Superseded by build_breadcrumbs()/breadcrumbs() below, which recompute
+    the trail statelessly from the current request's path on every call
+    instead of accumulating it in the session across requests. Kept here
+    unused, for reference and as an easy rollback if the stateless version
+    needs to be reverted.
+    """
     base_url = request.build_absolute_uri("/")
     company = white_labelling_company(request)["white_label_company_name"]
 
@@ -375,19 +411,9 @@ def breadcrumbs(request):
             if referer_path.rstrip("/") == dashboard_path.rstrip("/"):
                 section_override = {"name": _trans("Dashboard"), "url": dashboard_path}
 
-        if apps.is_installed("recruitment"):
-            from recruitment.models import Candidate
-
-            candidates = Candidate.objects.filter(is_active=True)
-
-        else:
-            candidates = None
-
-        employees = Employee.objects.all()
-
         if len(parts) > 1:
 
-            if "recruitment" in parts:
+            if "recruitment" in parts and apps.is_installed("recruitment"):
                 if "search-candidate" in parts:
                     pass
                 elif "candidate-view" in parts:
@@ -395,10 +421,13 @@ def breadcrumbs(request):
                 elif "get-mail-log-rec" in parts:
                     pass
                 else:
-                    # Store the candidates in the session
-                    request.session["filtered_candidates"] = [
-                        candidate.id for candidate in candidates
-                    ]
+                    from recruitment.models import Candidate
+
+                    sync_session_ids(
+                        request,
+                        "filtered_candidates",
+                        Candidate.objects.filter(is_active=True),
+                    )
 
             if "employee-filter-view" in parts:
                 pass
@@ -409,10 +438,7 @@ def breadcrumbs(request):
             elif parts[0] == "employee" and parts[-1].isdigit():
                 pass
             else:
-                # Store the employees in the session
-                request.session["filtered_employees"] = [
-                    employee.id for employee in employees
-                ]
+                sync_session_ids(request, "filtered_employees", Employee.objects.all())
 
         if len(parts) == 0:
             request.session["breadcrumbs"].clear()
@@ -540,6 +566,288 @@ def breadcrumbs(request):
     return {"breadcrumbs": request.session["breadcrumbs"]}
 
 
+def build_breadcrumbs(request):
+    """
+    Compute the breadcrumb trail for the current request's path alone,
+    independent of session state.
+    """
+    base_url = request.build_absolute_uri("/")
+    company = white_labelling_company(request)["white_label_company_name"]
+    root = {
+        "url": f"{base_url}?breadcrumb_nav=true",
+        "name": company,
+        "found": True,
+        "clickable": True,
+    }
+
+    if is_asset_request(request):
+        return [root]
+
+    parts = _split_path(request)
+    if not parts:
+        return [root]
+
+    menus = getattr(request, "MENUS", None)
+    if menus is None:
+        try:
+            from horilla.config import sidebar as _build_sidebar_menus
+
+            _build_sidebar_menus(request)
+            menus = getattr(request, "MENUS", [])
+        except Exception:
+            logger.exception("Failed building sidebar menus for breadcrumbs")
+            menus = []
+
+    current_section = _resolve_menu_section(request.path, menus)
+
+    section_override = None
+    referer = request.META.get("HTTP_REFERER")
+    if referer and parts[0] != "settings":
+        referer_path = urlparse(referer).path
+        try:
+            referer_url_name = resolve(referer_path).url_name or ""
+        except Resolver404:
+            referer_url_name = ""
+        if "dashboard" in referer_url_name:
+            referer_section = _resolve_menu_section(referer_path, menus)
+            if referer_section and referer_section != current_section:
+                section_override = {
+                    "name": referer_section[0],
+                    "url": referer_section[1],
+                }
+            elif referer_url_name == "dashboard" and current_section:
+                section_override = {"name": _trans("Dashboard"), "url": referer_path}
+
+    trail = [root]
+    path = base_url
+    for i, item in enumerate(parts):
+        path = path + item + "/"
+        check_path = urlparse(path).path
+        try:
+            resolver_match = resolve(check_path)
+            found = True
+        except Resolver404:
+            resolver_match = None
+            found = False
+
+        clickable = True
+        if found and not request.user.is_superuser:
+            view_func = resolver_match.func
+            required_perms = getattr(view_func, "_required_perms", [])
+            if not required_perms:
+                redirect_to = getattr(view_func, "_redirect_to", None)
+                if redirect_to:
+                    try:
+                        dest_match = resolve(reverse(redirect_to))
+                        required_perms = getattr(dest_match.func, "_required_perms", [])
+                    except Exception:
+                        pass
+            if required_perms:
+                clickable = all(request.user.has_perm(p) for p in required_perms)
+
+        crumb = {
+            "url": path,
+            "name": str(BREADCRUMB_URL_NAMES.get(item, item)),
+            "found": found,
+            "clickable": clickable,
+        }
+
+        if i == 0:
+            if section_override:
+                crumb["name"] = section_override["name"]
+                crumb["url"] = base_url.rstrip("/") + section_override["url"]
+                crumb["found"] = True
+            elif current_section:
+                crumb["name"] = current_section[0]
+
+                if not found:
+                    app = next(
+                        (
+                            m.get("app")
+                            for m in menus
+                            if str(m.get("menu")) == current_section[0]
+                        ),
+                        None,
+                    )
+                    if app:
+                        app_root = f"/{app}/"
+                        try:
+                            resolver_match = resolve(app_root)
+                            crumb["url"] = base_url.rstrip("/") + app_root
+                            crumb["found"] = True
+                            found = True
+                        except Resolver404:
+                            pass
+
+            if found:
+                redirect_to = getattr(resolver_match.func, "_redirect_to", None)
+                if redirect_to:
+                    try:
+                        crumb["url"] = base_url.rstrip("/") + reverse(redirect_to)
+                    except Exception:
+                        pass
+
+        if item == "attendance":
+            from base.templatetags.basefilters import is_reportingmanager
+
+            crumb["clickable"] = (
+                request.user.is_superuser
+                or request.user.has_perm("attendance.view_attendance")
+                or is_reportingmanager(request.user)
+            )
+
+        if item.isdigit() or is_valid_uuid(item):
+            url_kwargs = resolve(request.path_info).kwargs
+            model_value = url_kwargs.get("model")
+            if model_value:
+                try:
+                    obj = model_value.objects.get(id=item)
+                    # A model can name its own crumb when its str() is too long for one.
+                    crumb["name"] = str(
+                        obj.breadcrumb_name()
+                        if hasattr(obj, "breadcrumb_name")
+                        else obj
+                    ).strip()
+                    # A URL can say it is an action on the record ("Edit"), so
+                    # the page is its own crumb after the record's.
+                    label = url_kwargs.get("crumb_label")
+                    if label:
+                        crumb["name"] = f"{label} {crumb['name']}"
+                except Exception:
+                    pass
+
+        existing_names = [t["name"] for t in trail]
+        if (
+            crumb["name"] not in remove_urls + existing_names
+            and not crumb["name"].isdigit()
+        ):
+            trail.append(crumb)
+
+    # Preserve the current request's own (non-empty-valued) query string on
+    # its own trail entry, so reloading/clicking it keeps the same filters.
+    query_string = "breadcrumb_nav=true"
+    extra_query_string = "&".join(
+        pair
+        for pair in request.META.get("QUERY_STRING", "").split("&")
+        if "=" in pair and pair.split("=")[1] and pair.split("=")[0] != "breadcrumb_nav"
+    )
+    if extra_query_string:
+        query_string = f"{query_string}&{extra_query_string}"
+    if len(trail) > 1:
+        trail[-1]["url"] = f'{trail[-1]["url"].split("?")[0]}?{query_string}'
+
+    return trail
+
+
+def _is_sibling_page(crumb, leaf):
+    """
+    True when ``leaf`` is the same kind of page as ``crumb`` for another
+    record (employee-view/1/ then employee-view/7/): moving between records
+    replaces the crumb instead of stacking one record behind the next.
+    """
+    import re
+
+    def shape(url):
+        return re.sub(r"\d+", "N", urlparse(url or "").path.rstrip("/"))
+
+    here, there = (
+        urlparse(crumb.get("url") or "").path,
+        urlparse(leaf.get("url") or "").path,
+    )
+    return (
+        here.rstrip("/") != there.rstrip("/")
+        and shape(crumb.get("url")) == shape(leaf.get("url"))
+        and "N" in shape(leaf.get("url"))
+    )
+
+
+def breadcrumbs(request):
+    """
+    Active breadcrumbs context processor.
+    """
+    try:
+        if is_asset_request(request):
+            return {"breadcrumbs": request.session.get("breadcrumbs", [])}
+
+        existing = request.session.get("breadcrumbs")
+        has_existing = isinstance(existing, list) and existing
+
+        # The bar's own refresh request is not a page: it must not become a crumb.
+        if request.path.startswith("/breadcrumbs-fragment/"):
+            return {"breadcrumbs": existing if has_existing else []}
+
+        if request.GET.get("breadcrumb_nav") == "true":
+            if not has_existing:
+                return {"breadcrumbs": build_breadcrumbs(request)}
+            # One direction only: a trail is walked forward, and clicking an
+            # earlier crumb goes back to it and drops what came after. Left
+            # as it was, the page you came back from stayed in the trail,
+            # ahead of where you were.
+            here = request.path.rstrip("/")
+            for position, crumb in enumerate(existing):
+                if urlparse(crumb.get("url") or "").path.rstrip("/") == here:
+                    existing = existing[: position + 1]
+                    request.session["breadcrumbs"] = existing
+                    break
+            return {"breadcrumbs": existing}
+
+        local_trail = build_breadcrumbs(request)
+        is_htmx = "HTTP_HX_REQUEST" in request.META
+        is_sidebar_nav = request.META.get("HTTP_HX_SIDEBAR_NAV") == "true"
+        is_push_nav = request.META.get("HTTP_HX_PUSH_NAV") == "true"
+
+        # An in-place swap (a row opening a record, a Next arrow) asks for a
+        # fragment URL, not the address the browser ends up on, so it cannot say
+        # what the crumb should be. The page records its own crumb through
+        # breadcrumbs-fragment once the address has changed.
+        if is_htmx and not is_sidebar_nav:
+            trail = existing if has_existing else local_trail
+            return {"breadcrumbs": trail}
+
+        referer_path = urlparse(request.META.get("HTTP_REFERER") or "").path
+
+        reset = (
+            (is_htmx and is_sidebar_nav)
+            or (not is_htmx and not referer_path)
+            or len(local_trail) <= 1
+        )
+
+        if reset:
+            trail = local_trail
+        else:
+            trail = existing if has_existing else local_trail
+            leaf = local_trail[-1]
+            here = request.path.rstrip("/")
+            back_to = next(
+                (
+                    position
+                    for position, crumb in enumerate(trail)
+                    if urlparse(crumb.get("url") or "").path.rstrip("/") == here
+                ),
+                None,
+            )
+            if back_to is not None:
+                # A page already in the trail (the browser's Back, say): one
+                # direction only, so the crumbs after it are dropped.
+                trail = trail[: back_to + 1]
+            elif trail and _is_sibling_page(trail[-1], leaf):
+                trail = trail[:-1] + [leaf]
+            elif not trail or trail[-1].get("name") != leaf["name"]:
+                trail = trail + [leaf]
+
+        request.session["breadcrumbs"] = trail
+        return {"breadcrumbs": trail}
+    except Exception:
+        logger.exception("Failed building breadcrumbs for %s", request.path)
+        base_url = request.build_absolute_uri("/")
+        company = white_labelling_company(request)["white_label_company_name"]
+        fallback = [
+            {"url": base_url, "name": company, "found": True, "clickable": True}
+        ]
+        request.session["breadcrumbs"] = fallback
+        return {"breadcrumbs": fallback}
+
+
 def _section_redirect(url_name):
     """Return a named redirect view that stores its destination for breadcrumb permission checks."""
 
@@ -551,7 +859,9 @@ def _section_redirect(url_name):
 
 
 def _leave_redirect(request):
-    return redirect(reverse("leave-employee-dashboard") + "?dashboard=true")
+    if request.user.has_perm("leave.view_leaverequest"):
+        return redirect("leave-dashboard")
+    return redirect("user-request-view")
 
 
 def _attendance_redirect(request):
@@ -566,11 +876,19 @@ def _attendance_redirect(request):
     return redirect("attendance-view")
 
 
+def _employee_redirect(request):
+    from base.templatetags.basefilters import is_reportingmanager
+
+    if request.user.has_perm("employee.view_employee") or is_reportingmanager(
+        request.user
+    ):
+        return redirect("employee-dashboard")
+    return redirect("ess-dashboard")
+
+
 urlpatterns.append(path("recruitment/", _section_redirect("recruitment-dashboard")))
-urlpatterns.append(
-    path("onboarding/", _section_redirect("onboarding-modern-dashboard"))
-)
-urlpatterns.append(path("employee/", _section_redirect("ess-dashboard")))
+urlpatterns.append(path("onboarding/", _section_redirect("onboarding-dashboard")))
+urlpatterns.append(path("employee/", _employee_redirect))
 urlpatterns.append(path("attendance/", _attendance_redirect))
 urlpatterns.append(path("leave/", _leave_redirect))
 urlpatterns.append(path("payroll/", _section_redirect("view-payroll-dashboard")))

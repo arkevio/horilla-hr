@@ -13,12 +13,11 @@ from django import template
 from django.apps import apps
 from django.forms.widgets import SelectMultiple, Textarea
 from django.template import TemplateSyntaxError
-from django.template.defaultfilters import register
 from django.utils.translation import gettext as _
 
 from base.models import Company, EmployeeShiftSchedule, IntegrationApps
 from employee.methods.duration_methods import strtime_seconds
-from horilla.horilla_middlewares import _thread_locals
+from horilla.horilla_middlewares import _thread_locals, get_selected_company
 from horilla.methods import get_horilla_model_class
 from horilla_theme.models import CompanyTheme, HorillaColorTheme
 
@@ -317,15 +316,26 @@ def on_off(value):
 
 @register.filter(name="currency_symbol_position")
 def currency_symbol_position(amount):
-    if apps.is_installed("payroll"):
-        PayrollSettings = get_horilla_model_class(
-            app_label="payroll", model="payrollsettings"
-        )
-    symbol = PayrollSettings.objects.first()
+    if not apps.is_installed("payroll"):
+        return f"$ {amount}"
+
+    PayrollSettings = get_horilla_model_class(
+        app_label="payroll", model="payrollsettings"
+    )
+    company_id = get_selected_company()
+    symbol = None
+    if company_id and company_id != "all":
+        symbol = PayrollSettings.objects.filter(company_id=company_id).first()
+    if symbol is None:
+        symbol = PayrollSettings.objects.filter(company_id__isnull=True).first()
+    if symbol is None:
+        symbol = PayrollSettings.objects.first()
 
     currency = symbol.currency_symbol if symbol else "$"
 
-    if symbol.position == "postfix":
+    position = symbol.position if symbol else "prefix"
+
+    if position == "postfix":
         currency_symbol = f"{amount} {currency}"
     else:
         currency_symbol = f"{currency} {amount}"
@@ -359,6 +369,48 @@ def is_check_in_enabled(request):
 
     # Check if check-in is enabled
     return bool(attendance_settings and attendance_settings.enable_check_in)
+
+
+@register.filter(name="is_geofencing_enabled")
+def is_geofencing_enabled(request):
+    """
+    Whether the selected company has an active geo-fence -- the web
+    check-in/out buttons only need to capture the browser's location (and
+    the backend only needs to enforce it) when this is true.
+    """
+    from geofencing.models import GeoFencing
+
+    selected_company = request.session.get("selected_company")
+    if not selected_company or selected_company == "all":
+        return False
+    company = Company.objects.filter(id=selected_company).first()
+    if not company:
+        return False
+    fence = GeoFencing.objects.filter(company_id=company).first()
+    return bool(fence and fence.start)
+
+
+@register.filter(name="is_asset_fine_enabled")
+def is_asset_fine_enabled(request):
+    """
+    This method checks whether the asset fine feature is enabled.
+    """
+    from asset.models import AssetGeneralSetting
+
+    selected_company = request.session.get("selected_company")
+    if not selected_company:
+        return False  # Safeguard if session key is missing
+
+    # Fetch the settings based on the selected company
+    if selected_company == "all":
+        asset_settings = AssetGeneralSetting.objects.filter(company_id=None).first()
+    else:
+        company = Company.objects.filter(id=selected_company).first()
+        if not company:
+            return False  # Return False if the company doesn't exist
+        asset_settings = AssetGeneralSetting.objects.filter(company_id=company).first()
+
+    return bool(asset_settings and asset_settings.enable_asset_fine)
 
 
 @register.filter(name="is_timerunner_enabled")
@@ -433,6 +485,18 @@ def get_company(context):
     if company_id not in cache:
         cache[company_id] = _resolve_company_theme(company_id)
     return cache[company_id]
+
+
+@register.simple_tag
+def get_hq_company():
+    """
+    Returns the Company flagged as headquarters (Company.hq=True), for
+    public-facing pages (open recruitments, application form, candidate
+    survey) that need to show a real company identity regardless of the
+    WHITE_LABELLING setting or the viewer's session (these pages are reached
+    by anonymous candidates, who have no selected_company/employee context).
+    """
+    return Company.objects.filter(hq=True).order_by("id").first()
 
 
 @register.simple_tag

@@ -6,20 +6,27 @@ from django.db.models import Count
 from django.http import Http404, QueryDict
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from base.methods import filtersubordinates
+from horilla.decorators import check_manager
+from horilla_api.api_methods.base.methods import reject_reason_from
+from horilla_api.api_methods.base.pagination import HorillaPageNumberPagination
 from horilla_api.api_serializers.leave.serializers import *
 from leave.filters import *
 from leave.methods import filter_conditional_leave_request
 from leave.models import AvailableLeave, LeaveAllocationRequest, LeaveRequest, LeaveType
 from notifications.signals import notify
 
-from ...api_decorators.base.decorators import manager_permission_required
+from ...api_decorators.base.decorators import (
+    approver_permission_required,
+    manager_or_owner_permission_required,
+    manager_permission_required,
+)
 from ...api_methods.base.methods import groupby_queryset
 
 
@@ -29,7 +36,7 @@ class EmployeeAvailableLeaveGetAPIView(APIView):
     def get(self, request):
         employee = request.user.employee_get
         available_leave = employee.available_leave.all()
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         page = paginator.paginate_queryset(available_leave, request)
         serializer = GetAvailableLeaveTypeSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
@@ -54,7 +61,7 @@ class EmployeeLeaveRequestGetCreateAPIView(APIView):
         employee = request.user.employee_get
         leave_request = employee.leaverequest_set.all().order_by("-id")
         filterset = self.filterset_class(request.GET, queryset=leave_request)
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         field_name = request.GET.get("groupby_field", None)
         if field_name:
             url = request.build_absolute_uri()
@@ -79,11 +86,7 @@ class EmployeeLeaveRequestGetCreateAPIView(APIView):
                 notify.send(
                     request.user.employee_get,
                     recipient=leave_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                    verb="You have a new leave request to validate.",
-                    verb_ar="لديك طلب إجازة جديد يجب التحقق منه.",
-                    verb_de="Sie haben eine neue Urlaubsanfrage zur Validierung.",
-                    verb_es="Tiene una nueva solicitud de permiso que debe validar.",
-                    verb_fr="Vous avez une nouvelle demande de congé à valider.",
+                    verb=gettext_noop("You have a new leave request to validate."),
                     icon="people-circle",
                     redirect=f"/leave/request-view?id={leave_request.id}",
                     api_redirect=f"/api/leave/request/{leave_request.id}/",
@@ -165,7 +168,7 @@ class LeaveTypeGetCreateAPIView(APIView):
     def get(self, request):
         leave_type = LeaveType.objects.all()
         filterset = self.filterset_class(request.GET, queryset=leave_type)
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         page = paginator.paginate_queryset(filterset.qs, request)
         serializer = LeaveTypeAllGetSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
@@ -252,7 +255,7 @@ class LeaveAllocationRequestGetCreateAPIView(APIView):
             request, allocation_requests, "leave.view_leaveallocationrequest"
         )
         filterset = self.filterset_class(request.GET, queryset=queryset)
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         field_name = request.GET.get("groupby_field", None)
         if field_name:
             url = request.build_absolute_uri()
@@ -274,11 +277,10 @@ class LeaveAllocationRequestGetCreateAPIView(APIView):
                 notify.send(
                     request.user.employee_get,
                     recipient=allocation_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                    verb=f"New leave allocation request created for {allocation_request.employee_id}.",
-                    verb_ar=f"تم إنشاء طلب تخصيص إجازة جديد لـ {allocation_request.employee_id}.",
-                    verb_de=f"Neue Anfrage zur Urlaubszuweisung erstellt für {allocation_request.employee_id}.",
-                    verb_es=f"Nueva solicitud de asignación de permisos creada para {allocation_request.employee_id}.",
-                    verb_fr=f"Nouvelle demande d'allocation de congé créée pour {allocation_request.employee_id}.",
+                    verb=gettext_noop(
+                        "New leave allocation request created for %(employee)s."
+                    ),
+                    verb_params={"employee": str(allocation_request.employee_id)},
                     icon="people-cicle",
                     redirect=f"/leave/leave-allocation-request-view?id={allocation_request.id}",
                     api_redirect=f"/api/leave/allocation-request/{allocation_request.id}/",
@@ -298,13 +300,22 @@ class LeaveAllocationRequestGetUpdateDeleteAPIView(APIView):
         except LeaveAllocationRequest.DoesNotExist as e:
             raise serializers.ValidationError(e)
 
-    @manager_permission_required("leave.view_leaveallocationrequest")
+    # Reading and editing your own pending request is legitimate, so these keep
+    # an owner path -- but the manager branch has to name the requester rather
+    # than accept anyone who manages somebody (GHSA-gc35-jfv9-r3cm). Without
+    # this, any manager could read and rewrite another employee's allocation,
+    # requested_days included.
+    @manager_or_owner_permission_required(
+        LeaveAllocationRequest, "leave.view_leaveallocationrequest"
+    )
     def get(self, request, pk):
         allocation_request = self.get_leave_allocation_request(pk)
         serializer = LeaveAllocationRequestGetSerializer(allocation_request)
         return Response(serializer.data, status=200)
 
-    @manager_permission_required("leave.change_leaveallocationrequest")
+    @manager_or_owner_permission_required(
+        LeaveAllocationRequest, "leave.change_leaveallocationrequest"
+    )
     def put(self, request, pk):
         allocation_request = self.get_leave_allocation_request(pk)
         if allocation_request.status == "requested":
@@ -320,7 +331,11 @@ class LeaveAllocationRequestGetUpdateDeleteAPIView(APIView):
             return Response(serializer.errors, status=400)
         raise serializers.ValidationError({"error": _("Access Denied..")})
 
-    @manager_permission_required("leave.delete_leaveallocationrequest")
+    # Withdrawing your own request is legitimate; deleting someone else's needs
+    # the permission or actually managing them.
+    @manager_or_owner_permission_required(
+        LeaveAllocationRequest, "leave.delete_leaveallocationrequest"
+    )
     def delete(self, request, pk):
         allocation_request = self.get_leave_allocation_request(pk)
         if allocation_request.status == "requested":
@@ -357,7 +372,7 @@ class AssignLeaveGetCreateAPIView(APIView):
             request, available_leave, "leave.view_availableleave"
         )
         filterset = self.filterset_class(request.GET, queryset=queryset)
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         field_name = request.GET.get("groupby_field", None)
         if field_name:
             url = request.build_absolute_uri()
@@ -389,11 +404,7 @@ class AssignLeaveGetCreateAPIView(APIView):
                             notify.send(
                                 request.user.employee_get,
                                 recipient=employee_id.employee_user_id,
-                                verb="New leave type is assigned to you",
-                                verb_ar="تم تعيين نوع إجازة جديد لك",
-                                verb_de="Dir wurde ein neuer Urlaubstyp zugewiesen",
-                                verb_es="Se te ha asignado un nuevo tipo de permiso",
-                                verb_fr="Un nouveau type de congé vous a été attribué",
+                                verb=gettext_noop("New leave type is assigned to you"),
                                 icon="people-circle",
                                 redirect="/leave/user-request-view",
                                 api_redirect="/api/leave/user-request/",
@@ -470,7 +481,7 @@ class LeaveRequestGetCreateAPIView(APIView):
             | multiple_approvals
         )
         filterset = self.filterset_class(request.GET, queryset=queryset)
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         field_name = request.GET.get("groupby_field", None)
         if field_name:
             url = request.build_absolute_uri()
@@ -496,11 +507,8 @@ class LeaveRequestGetCreateAPIView(APIView):
                 notify.send(
                     request.user.employee_get,
                     recipient=leave_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                    verb=f"New leave request created for {leave_request.employee_id}.",
-                    verb_ar=f"تم إنشاء طلب إجازة جديد لـ {leave_request.employee_id}.",
-                    verb_de=f"Neuer Urlaubsantrag erstellt für {leave_request.employee_id}.",
-                    verb_es=f"Nueva solicitud de permiso creada para {leave_request.employee_id}.",
-                    verb_fr=f"Nouvelle demande de congé créée pour {leave_request.employee_id}.",
+                    verb=gettext_noop("New leave request created for %(employee)s."),
+                    verb_params={"employee": str(leave_request.employee_id)},
                     icon="people-circle",
                     redirect=f"/leave/request-view?id={leave_request.id}",
                     api_redirect=f"/api/leave/request/{leave_request.id}/",
@@ -523,7 +531,7 @@ class LeaveRequestGetUpdateDeleteAPIView(APIView):
         except LeaveRequest.DoesNotExist as e:
             raise serializers.ValidationError(e)
 
-    @manager_permission_required("leave.view_leaverequest")
+    @manager_or_owner_permission_required(LeaveRequest, "leave.view_leaverequest")
     def get(self, request, pk):
         leave_request = self.get_leave_request(pk)
         serializer = LeaveRequestGetSerilaizer(
@@ -531,7 +539,7 @@ class LeaveRequestGetUpdateDeleteAPIView(APIView):
         )
         return Response(serializer.data, status=200)
 
-    @manager_permission_required("leave.change_leaverequest")
+    @manager_or_owner_permission_required(LeaveRequest, "leave.change_leaverequest")
     def put(self, request, pk):
         leave_request = self.get_leave_request(pk)
         if leave_request.status == "requested":
@@ -550,11 +558,8 @@ class LeaveRequestGetUpdateDeleteAPIView(APIView):
                     notify.send(
                         request.user.employee_get,
                         recipient=leave_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                        verb=f"Leave request updated for {leave_request.employee_id}.",
-                        verb_ar=f"تم تحديث طلب الإجازة لـ {leave_request.employee_id}.",
-                        verb_de=f"Urlaubsantrag aktualisiert für {leave_request.employee_id}.",
-                        verb_es=f"Solicitud de permiso actualizada para {leave_request.employee_id}.",
-                        verb_fr=f"Demande de congé mise à jour pour {leave_request.employee_id}.",
+                        verb=gettext_noop("Leave request updated for %(employee)s."),
+                        verb_params={"employee": str(leave_request.employee_id)},
                         icon="people-circle",
                         redirect=f"/leave/request-view?id={leave_request.id}",
                         api_redirect=f"/api/leave/request/{leave_request.id}/",
@@ -568,7 +573,7 @@ class LeaveRequestGetUpdateDeleteAPIView(APIView):
             return Response(serializer.errors, status=400)
         raise serializers.ValidationError({"error": _("Access Denied..")})
 
-    @manager_permission_required("leave.delete_leaverequest")
+    @manager_or_owner_permission_required(LeaveRequest, "leave.delete_leaverequest")
     def delete(self, request, pk):
         leave_request = self.get_leave_request(pk)
         if leave_request.status == "requested":
@@ -586,7 +591,7 @@ class CompanyLeaveGetCreateAPIView(APIView):
     )
     def get(self, request):
         company_leave = CompanyLeaves.objects.all().order_by("-id")
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         page = paginator.paginate_queryset(company_leave, request)
         serializer = CompanyLeaveSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
@@ -651,7 +656,7 @@ class HolidayGetCreateAPIView(APIView):
     )
     def get(self, request):
         holiday = Holidays.objects.all().order_by("-id")
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         page = paginator.paginate_queryset(holiday, request)
         serializer = HoildaySerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
@@ -705,6 +710,18 @@ class HolidayGetUpdateDeleteAPIView(APIView):
         return Response(status=200)
 
 
+def _leave_condition_approvers(leave_request):
+    """
+    The managers a multiple-approval condition nominated for this request.
+
+    They approve in sequence and are frequently neither the requester's
+    reporting manager nor holders of ``leave.change_leaverequest``, so the
+    scoped manager test on its own would shut the chain out.
+    """
+    conditional = leave_request.multiple_approvals()
+    return conditional["managers"] if conditional else []
+
+
 class LeaveRequestApproveAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -755,7 +772,11 @@ class LeaveRequestApproveAPIView(APIView):
                 leave_request.status = "approved"
                 leave_request.save()
 
-    @manager_permission_required("leave.change_leaverequest")
+    @approver_permission_required(
+        LeaveRequest,
+        "leave.change_leaverequest",
+        designated_approvers=_leave_condition_approvers,
+    )
     def put(self, request, pk):
         leave_request = self.get_leave_request(pk)
         serializer = LeaveRequestApproveSerializer(leave_request, data=request.data)
@@ -771,11 +792,7 @@ class LeaveRequestApproveAPIView(APIView):
                 notify.send(
                     request.user.employee_get,
                     recipient=leave_request.employee_id.employee_user_id,
-                    verb="Your Leave request has been approved",
-                    verb_ar="تمت الموافقة على طلب الإجازة الخاص بك",
-                    verb_de="Ihr Urlaubsantrag wurde genehmigt",
-                    verb_es="Se ha aprobado su solicitud de permiso",
-                    verb_fr="Votre demande de congé a été approuvée",
+                    verb=gettext_noop("Your Leave request has been approved"),
                     icon="people-circle",
                     redirect=f"/leave/user-request-view?id={leave_request.id}",
                     api_redirect=f"/api/leave/user-request/{leave_request.id}",
@@ -806,21 +823,26 @@ class LeaveRequestRejectAPIView(APIView):
         leave_request.status = "rejected"
         leave_request.save()
 
-    @manager_permission_required("leave.change_leaverequest")
+    @approver_permission_required(
+        LeaveRequest,
+        "leave.change_leaverequest",
+        designated_approvers=_leave_condition_approvers,
+    )
     def put(self, request, pk):
         leave_request = self.get_leave_request(pk)
         employee_id = request.user.employee_get
         if leave_request.status != "rejected":
+            reason = reject_reason_from(request)
+            if reason:
+                # The field the web reject form fills; saved by
+                # leave_calculation below.
+                leave_request.reject_reason = reason
             self.leave_calculation(leave_request, employee_id)
             with contextlib.suppress(Exception):
                 notify.send(
                     request.user.employee_get,
                     recipient=leave_request.employee_id.employee_user_id,
-                    verb="Your Leave request has been rejected",
-                    verb_ar="تم رفض طلب الإجازة الخاص بك",
-                    verb_de="Ihr Urlaubsantrag wurde abgelehnt",
-                    verb_es="Tu solicitud de permiso ha sido rechazada",
-                    verb_fr="Votre demande de congé a été rejetée",
+                    verb=gettext_noop("Your Leave request has been rejected"),
                     icon="people-circle",
                     redirect=f"/leave/user-request-view?id={leave_request.id}",
                     api_redirect=f"/api/leave/user-request/{leave_request.id}/",
@@ -871,7 +893,13 @@ class LeaveAllocationApproveAPIView(APIView):
         available_leave.available_days += leave_allocation_request.requested_days
         available_leave.save()
 
-    @manager_permission_required("leave.change_leaveallocationrequest")
+    # Approving credits requested_days straight onto the requester's balance,
+    # so this needs a second person who actually manages them -- not
+    # manager_permission_required, which passes anyone who manages anybody and
+    # let a manager approve their own allocation (GHSA-gc35-jfv9-r3cm).
+    @approver_permission_required(
+        LeaveAllocationRequest, "leave.change_leaveallocationrequest"
+    )
     def put(self, request, pk):
         leave_allocation_request = self.get_leave_allocation_request(pk)
         if leave_allocation_request.status == "requested":
@@ -904,12 +932,20 @@ class LeaveAllocationRequestRejectAPIView(APIView):
             )
             available_leave.save()
 
-    @manager_permission_required("leave.change_leaveallocationrequest")
+    # Rejecting an already-approved allocation subtracts the days again, so the
+    # same gate applies: an unscoped manager could zero out another employee's
+    # balance. Not in the report, same decorator, same reach.
+    @approver_permission_required(
+        LeaveAllocationRequest, "leave.change_leaveallocationrequest"
+    )
     def put(self, request, pk):
         leave_allocation_request = self.get_leave_allocation_request(pk)
         if leave_allocation_request.status != "rejected":
             self.reject_calculation(leave_allocation_request)
             leave_allocation_request.status = "rejected"
+            reason = reject_reason_from(request)
+            if reason:
+                leave_allocation_request.reject_reason = reason
             leave_allocation_request.save()
             return Response(status=200)
         raise serializers.ValidationError(_("Access Denied."))
@@ -932,6 +968,35 @@ class LeaveRequestBulkApproveDeleteAPIview(APIView):
             return leave_requests
         raise serializers.ValidationError(_("Nothing to approve"))
 
+    def scoped_to_caller(self, request, leave_requests, approving):
+        """
+        Narrow a bulk action to the requests this caller may actually act on.
+
+        The by-pk approve and reject endpoints name their target and are scoped
+        by decorator; this one takes a list of ids from the body, so the same
+        rule has to be applied per record or the bulk route is simply the
+        unscoped version of the endpoint next door (GHSA-97wm-28fj-g4pj).
+        """
+        employee = request.user.employee_get
+        perm = "leave.change_leaverequest" if approving else "leave.delete_leaverequest"
+        if request.user.has_perm(perm):
+            return leave_requests
+
+        allowed = []
+        for leave_request in leave_requests:
+            own = leave_request.employee_id == employee
+            if approving:
+                # Never your own, exactly as the single-record endpoint.
+                if own:
+                    continue
+                if check_manager(
+                    employee, leave_request
+                ) or employee in _leave_condition_approvers(leave_request):
+                    allowed.append(leave_request.pk)
+            elif own or check_manager(employee, leave_request):
+                allowed.append(leave_request.pk)
+        return leave_requests.filter(pk__in=allowed)
+
     def leave_approve_calculation(self, leave_request, available_leave):
         if leave_request.requested_days > available_leave.available_days:
             leave = leave_request.requested_days - available_leave.available_days
@@ -949,7 +1014,9 @@ class LeaveRequestBulkApproveDeleteAPIview(APIView):
 
     @manager_permission_required("leave.change_leaverequest")
     def put(self, request):
-        leave_requests = self.get_leave_requests(request)
+        leave_requests = self.scoped_to_caller(
+            request, self.get_leave_requests(request), approving=True
+        )
         for leave_request in leave_requests:
             employee_id = leave_request.employee_id
             leave_type_id = leave_request.leave_type_id
@@ -967,7 +1034,9 @@ class LeaveRequestBulkApproveDeleteAPIview(APIView):
 
     @manager_permission_required("leave.delete_leaverequest")
     def delete(self, request):
-        leave_requests = self.get_leave_requests(request)
+        leave_requests = self.scoped_to_caller(
+            request, self.get_leave_requests(request), approving=False
+        )
         leave_requests.delete()
         return Response(status=200)
 
@@ -997,7 +1066,7 @@ class EmployeeLeaveAllocationGetCreateAPIView(APIView):
         employee = self.get_user(request).employee_get
         allocation_requests = employee.leaveallocationrequest_set.all().order_by("-id")
         filterset = self.filterset_class(request.GET, queryset=allocation_requests)
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         field_name = request.GET.get("groupby_field", None)
         if field_name:
             url = request.build_absolute_uri()
@@ -1093,7 +1162,7 @@ class EmployeeAvailableLeaveTypeGetAPIView(APIView):
         available_leave = employee.available_leave.all()
         leave_type_ids = available_leave.values_list("leave_type_id", flat=True)
         leave_types = LeaveType.objects.filter(id__in=leave_type_ids)
-        paginator = PageNumberPagination()
+        paginator = HorillaPageNumberPagination()
         page = paginator.paginate_queryset(leave_types, request)
         serializer = LeaveTypeAllGetSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)

@@ -23,6 +23,63 @@ from report.models import ReportSubscription
 from report.registry import DOMAIN_LABELS, get_report, reports_by_domain
 
 
+def _subscription_actions():
+    """
+    Edit/Send now/Pause-Activate/Delete action buttons, shared verbatim
+    between the subscriptions list row and the detail-view modal footer -
+    both render a dict-based `actions` list the same way (see
+    horilla_detailed_view.html and horilla_list_table.html, both do
+    `{{action.attrs|format:object_or_instance}}`), so one shared list keeps
+    them from drifting out of sync.
+    """
+    return [
+        {
+            "action": _("Edit"),
+            "icon": "create-outline",
+            "attrs": """
+                class="oh-btn oh-btn--light-bkg oh-btn--sq-sm"
+                title="{% trans 'Edit' %}"
+                data-toggle="oh-modal-toggle"
+                data-target="#genericModal"
+                hx-get="{get_edit_url}"
+                hx-target="#genericModalBody"
+            """,
+        },
+        {
+            "action": _("Send now"),
+            "icon": "send-outline",
+            "attrs": """
+                class="oh-btn oh-btn--success oh-btn--sq-sm"
+                title="{% trans 'Send now' %}"
+                hx-confirm="{% trans 'Send this report now?' %}"
+                hx-post="{get_run_url}"
+                hx-target="#relatedModel"
+            """,
+        },
+        {
+            "action": _("Pause/Activate"),
+            "icon": "power-outline",
+            "attrs": """
+                class="oh-btn oh-btn--light-bkg oh-btn--sq-sm"
+                title="{% trans 'Pause or activate' %}"
+                hx-post="{get_toggle_url}"
+                hx-target="#relatedModel"
+            """,
+        },
+        {
+            "action": _("Delete"),
+            "icon": "trash-outline",
+            "attrs": """
+                class="oh-btn oh-btn--danger oh-btn--sq-sm"
+                title="{% trans 'Delete' %}"
+                hx-confirm="{% trans 'Delete this subscription?' %}"
+                hx-post="{get_delete_url}"
+                hx-target="#relatedModel"
+            """,
+        },
+    ]
+
+
 @method_decorator(login_required, name="dispatch")
 class ReportSubscriptionsView(TemplateView):
     """Thin page shell — HTMX-loads the Nav and List fragments below."""
@@ -54,10 +111,7 @@ class ReportSubscriptionsNav(HorillaNavView):
 
 @method_decorator(login_required, name="dispatch")
 class ReportSubscriptionsListView(HorillaListView):
-    """
-    Every user only ever sees/manages their own subscriptions — matches the
-    ownership scoping the previous function-based view enforced.
-    """
+    """List of the current user's own report subscriptions."""
 
     model = ReportSubscription
     # True (not False) is what actually unlocks the checkbox column that
@@ -75,9 +129,9 @@ class ReportSubscriptionsListView(HorillaListView):
         (_("Subscription"), "name"),
         (_("Report"), "report_name"),
         (_("Frequency"), "frequency_label"),
-        (_("Recipients"), "recipients"),
+        (_("Recipients"), "recipients_display"),
         (_("Status"), "status_label"),
-        (_("Last sent"), "last_run_at"),
+        (_("Last sent"), "last_run_display"),
     ]
 
     # Clicking anywhere on the row opens the detail view — matches the same
@@ -122,52 +176,7 @@ class ReportSubscriptionsListView(HorillaListView):
                 """,
             ),
         ]
-        self.actions = [
-            {
-                "action": _("Edit"),
-                "icon": "create-outline",
-                "attrs": """
-                    class="oh-btn oh-btn--light-bkg oh-btn--sq-sm"
-                    title="{% trans 'Edit' %}"
-                    data-toggle="oh-modal-toggle"
-                    data-target="#genericModal"
-                    hx-get="{get_edit_url}"
-                    hx-target="#genericModalBody"
-                """,
-            },
-            {
-                "action": _("Send now"),
-                "icon": "send-outline",
-                "attrs": """
-                    class="oh-btn oh-btn--success oh-btn--sq-sm"
-                    title="{% trans 'Send now' %}"
-                    hx-confirm="{% trans 'Send this report now?' %}"
-                    hx-post="{get_run_url}"
-                    hx-target="#relatedModel"
-                """,
-            },
-            {
-                "action": _("Pause/Activate"),
-                "icon": "power-outline",
-                "attrs": """
-                    class="oh-btn oh-btn--light-bkg oh-btn--sq-sm"
-                    title="{% trans 'Pause or activate' %}"
-                    hx-post="{get_toggle_url}"
-                    hx-target="#relatedModel"
-                """,
-            },
-            {
-                "action": _("Delete"),
-                "icon": "trash-outline",
-                "attrs": """
-                    class="oh-btn oh-btn--danger oh-btn--sq-sm"
-                    title="{% trans 'Delete' %}"
-                    hx-confirm="{% trans 'Delete this subscription?' %}"
-                    hx-post="{get_delete_url}"
-                    hx-target="#relatedModel"
-                """,
-            },
-        ]
+        self.actions = _subscription_actions()
 
     def get_queryset(self, queryset=None, filtered=False, *args, **kwargs):
         # HorillaListView's base get_queryset() ultimately calls the manager's
@@ -190,18 +199,12 @@ class ReportSubscriptionsListView(HorillaListView):
 
 @method_decorator(login_required, name="dispatch")
 class ReportSubscriptionFormView(HorillaFormView):
-    """
-    Real Horilla create/edit form component (base.forms.ModelForm +
-    generic/form.html) — one view handles all three entry points:
-      - locked create: URL supplies `slug` (a report row's Subscribe icon)
-      - picker create: URL supplies neither `slug` nor `pk` (the
-        Subscriptions list's own Create button — no report context yet)
-      - edit: URL supplies `pk` (a subscription row's Edit action)
-    """
+    """Create/edit form for a report subscription."""
 
     model = ReportSubscription
     form_class = ReportSubscriptionForm
     new_display_title = _("Create a subscription")
+    template_name = "cbv/subscriptions/subscription_form.html"
 
     def _permission_denied(self, request: HttpRequest) -> HttpResponse:
         message = _("You do not have permission to subscribe to this report.")
@@ -236,9 +239,9 @@ class ReportSubscriptionFormView(HorillaFormView):
                     initial.setdefault("name", str(definition.name))
             initial.setdefault("frequency", "weekly")
             initial.setdefault("format", "xlsx")
-            initial.setdefault(
-                "recipients", getattr(self.request.user, "email", "") or ""
-            )
+            own_employee = getattr(self.request.user, "employee_get", None)
+            if own_employee:
+                initial.setdefault("recipients_employees", [own_employee.pk])
         return initial
 
     def init_form(self, *args, data={}, files={}, instance=None, **kwargs):
@@ -304,10 +307,7 @@ class ReportSubscriptionFormView(HorillaFormView):
 
 @method_decorator(login_required, name="dispatch")
 class ReportSubscriptionDetailView(HorillaDetailedView):
-    """Real Horilla detailed-view component — opened by clicking a row on
-    the Subscriptions list. No avatar/header card (subscriptions have no
-    visual identity beyond their name), so header is disabled and the name
-    is used as the modal title instead."""
+    """Detail view for a single report subscription."""
 
     model = ReportSubscription
     pk_url_kwarg = "subscription_id"
@@ -316,11 +316,15 @@ class ReportSubscriptionDetailView(HorillaDetailedView):
         (_("Report"), "report_name"),
         (_("Frequency"), "frequency_label"),
         (_("Attachment"), "format_label"),
-        (_("Recipients"), "recipients"),
+        (_("Recipients"), "recipients_display"),
         (_("Status"), "status_label"),
-        (_("Last sent"), "last_run_at"),
+        (_("Last sent"), "last_run_display"),
         (_("Created"), "created_at"),
     ]
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.actions = _subscription_actions()
 
     def get_queryset(self):
         return ReportSubscription.objects.filter(owner=self.request.user)

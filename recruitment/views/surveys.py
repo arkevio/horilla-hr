@@ -12,12 +12,12 @@ from uuid import uuid4
 from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.core import serializers
-from django.core.cache import cache as CACHE
 from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.models import ProtectedError
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect, render
+from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
 from base.methods import closest_numbers
@@ -49,6 +49,35 @@ from recruitment.models import (
 )
 from recruitment.pipeline_grouper import group_by_queryset
 from recruitment.views.paginator_qry import paginator_qry
+
+# candidate_survey() writes uploads under MEDIA_ROOT with the extension the
+# uploader chose, on a public, unauthenticated endpoint. MEDIA_ROOT sits
+# under the app's own working directory (a namespace package with no
+# __init__.py), so a saved .py file is importable by anything that later
+# does a dotted-path import against it -- reject server-executable
+# extensions outright rather than trust what gets done with the file later.
+DISALLOWED_ATTACHMENT_EXTENSIONS = {
+    ".py",
+    ".pyc",
+    ".pyo",
+    ".pyw",
+    ".php",
+    ".php3",
+    ".php4",
+    ".php5",
+    ".phtml",
+    ".cgi",
+    ".pl",
+    ".sh",
+    ".bash",
+    ".exe",
+    ".dll",
+    ".so",
+    ".jsp",
+    ".jspx",
+    ".asp",
+    ".aspx",
+}
 
 
 @login_required
@@ -139,7 +168,13 @@ def candidate_survey(request):
     rec_id = candidate_dict[0]["fields"]["recruitment_id"]
     job_id = candidate_dict[0]["fields"]["job_position_id"]
     job = JobPosition.objects.get(id=job_id)
-    recruitment = Recruitment.objects.get(id=rec_id)
+    # Public/unauthenticated flow (candidate just applied) -- Recruitment.objects
+    # is company-scoped to whatever company is "selected" in this browser's
+    # session, which for a public visitor has nothing to do with the
+    # recruitment's own company and would raise DoesNotExist for a valid
+    # recruitment. Use the unscoped manager, same as open_recruitments/
+    # recruitment_details/application_form.
+    recruitment = Recruitment.default.get(id=rec_id)
     stage_id = candidate_dict[0]["fields"]["stage_id"]
     created_by = candidate_dict[0]["fields"].get("created_by")
     modified_by = candidate_dict[0]["fields"].get("modified_by")
@@ -200,19 +235,31 @@ def candidate_survey(request):
                     "survey/candidate_survey_form.html",
                     {"form": form, "candidate": candidate},
                 )
-            attachment_path = f"recruitment_attachment/{attachment.name}"
-            attachment_dir = os.path.dirname(default_storage.path(attachment_path))
-            if not os.path.exists(attachment_dir):
-                os.makedirs(attachment_dir)
-            with default_storage.open(attachment_path, "wb+") as destination:
-                for chunk in attachment.chunks():
-                    destination.write(chunk)
+            if (
+                os.path.splitext(attachment.name)[1].lower()
+                in DISALLOWED_ATTACHMENT_EXTENSIONS
+            ):
+                messages.error(request, _("That file type isn't allowed."))
+                return render(
+                    request,
+                    "survey/candidate_survey_form.html",
+                    {"form": form, "candidate": candidate},
+                )
+            original_name = os.path.basename(attachment.name)
+            safe_name = f"{uuid4().hex}_{original_name}"
+            attachment_path = default_storage.save(
+                f"recruitment_attachment/{safe_name}", attachment
+            )
             answer.attachment = attachment_path
             answer_data[key] = [attachment_path]
         answer.answer_json = json.dumps(answer_data)
         answer.save()
         messages.success(request, _("Your answers are submitted."))
-        return render(request, "candidate/success.html")
+        return render(
+            request,
+            "candidate/success.html",
+            {"candidate": candidate, "recruitment": recruitment},
+        )
     return render(
         request,
         "survey/candidate_survey_form.html",
@@ -344,6 +391,124 @@ def create_question_template(request):
 
 
 @login_required
+@hx_request_required
+@is_recruitment_manager(perm="recruitment.view_recruitmentsurvey")
+def survey_template_tab(request):
+    """
+    Root of the Template tab: loads its own navbar, then its own list
+    container.
+    """
+    return render(request, "survey/template_tab_root.html", {})
+
+
+@login_required
+@hx_request_required
+@is_recruitment_manager(perm="recruitment.view_recruitmentsurvey")
+def survey_template_tab_list(request):
+    """
+    Template accordion content for the Template tab, and the hx-get target
+    for that tab's own navbar (recruitment.cbv.recruitment_survey.SurveyTemplateNavView)
+    search box and pagination.
+    """
+    survey_templates = SurveyTemplate.objects.all()
+    search = request.GET.get("search", "").strip()
+    if search:
+        survey_templates = survey_templates.filter(title__icontains=search)
+    questions = SurveyFilter(request.GET, RecruitmentSurvey.objects.all()).qs
+
+    previous_data = request.GET.urlencode()
+    templates = group_by_queryset(
+        questions.filter(template_id__isnull=False).distinct(),
+        "template_id__title",
+        page=1,
+        page_name="template_page",
+        records_per_page=1000000,
+    )
+    all_template_object_list = list(templates)
+
+    all_templates = survey_templates.values_list("title", flat=True)
+    used_templates = questions.values_list("template_id__title", flat=True)
+    unused_templates = list(set(all_templates) - set(used_templates))
+    for template_name in unused_templates:
+        all_template_object_list.append(
+            {"grouper": template_name, "list": [], "dynamic_name": ""}
+        )
+
+    templates = paginator_qry(
+        all_template_object_list, request.GET.get("template_page")
+    )
+    requests_ids = json.dumps(
+        [
+            instance.id
+            for instance in paginator_qry(
+                questions, request.GET.get("page")
+            ).object_list
+        ]
+    )
+    return render(
+        request,
+        "survey/template_accordion.html",
+        {
+            "templates": templates,
+            "pd": previous_data,
+            "requests_ids": requests_ids,
+        },
+    )
+
+
+@login_required
+@hx_request_required
+@is_recruitment_manager(perm="recruitment.view_recruitmentsurvey")
+def survey_question_tab(request):
+    """
+    Root of the Questions tab: loads its own navbar, then its own list
+    container.
+    """
+    return render(request, "survey/question_tab_root.html", {})
+
+
+@login_required
+@hx_request_required
+@is_recruitment_manager(perm="recruitment.view_recruitmentsurvey")
+def survey_question_tab_list(request):
+    """
+    Question grid content for the Questions tab, and the hx-get target for
+    that tab's own navbar (recruitment.cbv.recruitment_survey.SurveyQuestionNavView)
+    search box and pagination.
+    """
+    if request.user.has_perm("recruitment.view_recruitmentsurvey"):
+        questions = RecruitmentSurvey.objects.all()
+    else:
+        ids = []
+        for recruitment in Recruitment.objects.all():
+            for manager in recruitment.recruitment_managers.all():
+                if request.user.employee_get == manager:
+                    ids.append(recruitment.id)
+        questions = RecruitmentSurvey.objects.filter(recruitment_ids__in=ids)
+
+    questions = SurveyFilter(request.GET, questions).qs
+
+    previous_data = request.GET.urlencode()
+    requests_ids = json.dumps(
+        [
+            instance.id
+            for instance in paginator_qry(
+                questions, request.GET.get("page")
+            ).object_list
+        ]
+    )
+    return render(
+        request,
+        "survey/question_card.html",
+        {
+            "questions": paginator_qry(questions, request.GET.get("page")),
+            "pd": previous_data,
+            "requests_ids": requests_ids,
+        },
+    )
+
+
+@login_required
 @permission_required(perm="recruitment.delete_recruitmentsurvey")
 def delete_survey_question(request, survey_id):
     """
@@ -357,10 +522,21 @@ def delete_survey_question(request, survey_id):
     except ProtectedError:
         messages.error(request, _("You cannot delete this question"))
     if request.META.get("HTTP_HX_REQUEST") == "true":
-        from recruitment.views.search import filter_survey
-
-        return filter_survey(request)
-    return redirect(view_question_template)
+        # Reached from two different places sharing this one delete route -
+        # a question row nested inside the Templates accordion, and a
+        # question card on the Questions tab - each targeting its own list
+        # container. Redirect back to whichever list actually asked, so
+        # only that container is refreshed.
+        hx_target = request.META.get("HTTP_HX_TARGET")
+        if hx_target == "survey-templates-container":
+            return redirect(reverse("list-survey-templates"))
+        # Restored previous implementation's containers (view_question_templates.html)
+        if hx_target == "view-container":
+            return redirect(reverse("survey-template-tab-list"))
+        if hx_target == "questionViewContainer":
+            return redirect(reverse("survey-question-tab-list"))
+        return redirect(reverse("list-survey-questions"))
+    return redirect("recruitment-survey-question-template-view")
 
 
 def application_form(request):
@@ -370,14 +546,29 @@ def application_form(request):
     recruitment = None
     recruitment_id = request.GET.get("recruitmentId")
     resume_id = request.GET.get("resumeId")
-    resume_obj = Resume.objects.filter(id=resume_id).first()
+    # Scoped to the recruitment being applied to. This page is public and
+    # unauthenticated, and the POST branch below reads this file and attaches
+    # it to the submitted application -- so an unscoped lookup let anyone
+    # harvest any CV in the database, in any company, by walking sequential
+    # ids. Resume has no company_id of its own, so the recruitment is what
+    # scopes it.
+    resume_obj = (
+        Resume.objects.filter(id=resume_id, recruitment_id=recruitment_id).first()
+        if resume_id and recruitment_id
+        else None
+    )
 
     if request.method == "GET" and not recruitment_id:
         messages.error(request, _("Recruitment ID is missing"))
         return redirect("open-recruitments")
 
     try:
-        recruitment = Recruitment.objects.filter(
+        # Unscoped manager: this page is public/unauthenticated, and
+        # Recruitment.objects is company-scoped to the session's "selected
+        # company", which has no relation to a public visitor's session --
+        # scoping here would 404 valid recruitments from any company other
+        # than whichever one happens to be selected.
+        recruitment = Recruitment.default.filter(
             id=recruitment_id, is_published=True
         ).first()  # Only create applications for published recruitments.
         if not recruitment:
@@ -399,6 +590,12 @@ def application_form(request):
         form = ApplicationForm(request.POST, request.FILES)
         if form.is_valid():
             candidate_obj = form.save(commit=False)
+            # Mirrors the internal "add candidate" form always tagging
+            # itself "software" (recruitment/views/views.py) -- without
+            # this, every public career-page applicant leaves `source`
+            # NULL, which is why "Source of Hire" on the dashboard only
+            # ever had a "Not Specified" slice to show.
+            candidate_obj.source = "application"
             recruitment_obj = candidate_obj.recruitment_id
             stages = recruitment_obj.stage_set.all()
             if stages.filter(stage_type="applied").exists():
@@ -410,11 +607,6 @@ def application_form(request):
             request.session["candidate"] = serializers.serialize(
                 "json", [candidate_obj]
             )
-            if resume_obj:
-                resume_obj.is_candidate = True
-                resume_obj.save()
-                CACHE.delete(f"matching_resumes_{resume_obj.recruitment_id_id}")
-
             has_direct_survey = RecruitmentSurvey.objects.filter(
                 recruitment_ids=recruitment_id
             ).exists()
@@ -425,7 +617,15 @@ def application_form(request):
                 return redirect(candidate_survey)
             candidate_obj.save()
 
-            return render(request, "candidate/success.html")
+            if resume_obj:
+                resume_obj.is_candidate = True
+                resume_obj.save()
+
+            return render(
+                request,
+                "candidate/success.html",
+                {"candidate": candidate_obj, "recruitment": recruitment_obj},
+            )
         for field_name, field_errors in form.errors.items():
             if field_name == "__all__":
                 for error in field_errors:
@@ -444,7 +644,7 @@ def application_form(request):
                     )
         recruitment_for_job_position = form.data.get("recruitment_id") or recruitment_id
         if recruitment_for_job_position:
-            recruitment_for_job_position = Recruitment.objects.filter(
+            recruitment_for_job_position = Recruitment.default.filter(
                 id=recruitment_for_job_position
             ).first()
             if recruitment_for_job_position:
@@ -493,7 +693,7 @@ def create_template(request):
         request.user.has_perm("recruitment.add_surveytemplate")
         or request.user.has_perm("recruitment.change_surveytemplate")
     ):
-        messages.info(request, _("You dont have permission."))
+        messages.info(request, _("You don't have permission."))
         return HorillaRedirect(request)
 
     title = request.GET.get("title")
@@ -524,7 +724,32 @@ def delete_template(request):
         messages.success(request, _("Template group deleted"))
 
     if request.META.get("HTTP_HX_REQUEST") == "true":
-        return HttpResponse("<script>$('#filterSubmit').click();</script>")
+        return HttpResponse(
+            "<script>$('#templateTabRoot .filterButton').click();</script>"
+        )
+    return HorillaRedirect(request)
+
+
+@login_required
+@permission_required("recruitment.delete_surveytemplate")
+def delete_survey_template(request, pk):
+    """
+    This method is used to delete a single survey template by its pk, used
+    by the Survey Templates page's Templates accordion.
+    """
+    template = SurveyTemplate.objects.filter(pk=pk).first()
+    if template is None:
+        messages.error(request, _("Template not found."))
+    elif template.is_general_template:
+        messages.info(request, _("This template group cannot be deleted"))
+    else:
+        template.delete()
+        messages.success(request, _("Template group deleted"))
+
+    if request.META.get("HTTP_HX_REQUEST") == "true":
+        return HttpResponse(
+            "<script>$('#templateTabRoot .filterButton').click();</script>"
+        )
     return HorillaRedirect(request)
 
 
@@ -538,7 +763,7 @@ def question_add(request):
     template = None
     title = request.GET.get("title")
     if title:
-        template = SurveyTemplate.objects.filter(title=title).first
+        template = SurveyTemplate.objects.filter(title=title).first()
 
     form = AddQuestionForm(initial={"template_ids": template})
     if request.method == "POST":
@@ -549,9 +774,9 @@ def question_add(request):
             if request.META.get("HTTP_HX_REQUEST") == "true":
                 return HttpResponse(
                     "<script>"
-                    "$('#templateModal').removeClass('oh-modal--show');"
                     "$('#genericModal').removeClass('oh-modal--show');"
-                    "$('#filterSubmit').click();"
+                    "$('#reloadMessagesButton').click();"
+                    "$('.reload-record').click();"
                     "</script>"
                 )
             return HorillaRedirect(request)

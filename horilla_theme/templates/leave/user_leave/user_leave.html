@@ -1,5 +1,5 @@
 {% load static i18n i18n %}
-<div class="grid grid-cols-12 gap-3 mb-2">
+<div class="grid grid-cols-12 gap-3 mb-2" id="userLeaveCards">
     {% for user_leave in user_leaves %}
         <div
             class="col-span-2"
@@ -31,7 +31,7 @@
                         </p>
                     </div>
                     <div class="flex justify-between mb-1 text-xs text-dark-200">
-                        <p>{% trans "Carryforwrad Leave Days" %}</p>
+                        <p>{% trans "Carryforward Leave Days" %}</p>
                         <p class="text-sm font-bold">{{ user_leave.carryforward_days }}</p>
                     </div>
                     <div class="flex justify-between mb-1 text-xs text-dark-200">

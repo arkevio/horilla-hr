@@ -1,5 +1,6 @@
 {% extends 'index.html' %}
 {% load i18n %}
+{% load basefilters %}
 {% load static i18n audit_filters basefilters helpdeskfilters i18n %}
 {% block content %}
     <style>
@@ -101,11 +102,30 @@
                         </div>
                         <div class="flex justify-between items-center text-sm mb-3">
                             <span class="font-medium text-xs">{% trans "Deadline" %}</span>
-                            <span class="font-medium dateformat_changer">{{ ticket.deadline }}</span>
+                            {% if ticket.can_manage_priority %}
+                                <form
+                                    hx-post="{% url 'update-deadline' ticket.id %}"
+                                    hx-trigger="change"
+                                    hx-swap="none"
+                                    method="post"
+                                >
+                                    {% csrf_token %}
+                                    <input
+                                        type="date"
+                                        name="deadline"
+                                        class="oh-input"
+                                        value="{{ ticket.deadline|date:'Y-m-d' }}"
+                                    >
+                                </form>
+                            {% elif ticket.deadline %}
+                                <span class="font-medium dateformat_changer">{{ ticket.deadline }}</span>
+                            {% else %}
+                                <span class="font-medium">-</span>
+                            {% endif %}
                         </div>
                         <div class="flex justify-between items-center text-sm mb-3">
                             <span class="font-medium text-xs">{% trans "Priority" %}</span>
-                            {% if perms.helpdesk.change_ticket or request.user.employee_get|is_department_manager:ticket or request.user.employee_get in ticket.assigned_to.all or request.user.employee_get == ticket.employee_id %}
+                            {% if ticket.can_manage_priority %}
                                 <form hx-swap="none" hx-post="{% url 'update-priority' ticket.id %}" method="post">
                                     {% csrf_token %}
                                     <div class="d-flex">
@@ -141,15 +161,7 @@
                                     </div>
                                 </form>
                             {% else %}
-                                <ul class="flex gap-1 text-xs">
-                                    {% for i in "123" %}
-                                        <li>
-                                            <i
-                                                class="fa-solid fa-star {% if rating >= i %}text-[#FFA800] {% else %} text-[#dfdfdf]{% endif %}"
-                                            ></i>
-                                        </li>
-                                    {% endfor %}
-                                </ul>
+                                {{ticket.get_priority_stars|safe}}
                             {% endif %}
                         </div>
                         <div class="flex justify-between items-center text-sm mb-5">
@@ -391,7 +403,7 @@
                             </p>
                         </div>
                         <p class="text-sm text-[#333]">
-                            {{ ticket.description|safe }}
+                            {{ ticket.description|sanitize_html }}
                         </p>
                     </div>
                     <div class="h-[calc(100vh_-_365px)] overflow-hidden overflow-y-auto p-5" id="ticketContainer">
@@ -423,7 +435,7 @@
                                                 hx-trigger="focusout"
                                             >{{item.comment.comment}}</textarea>
                                             <span class="text-sm text-[#333] comment_text">
-                                                {{ item.comment.comment|safe }}
+                                                {{ item.comment.comment|sanitize_html }}
                                             </span>
                                             <div class="oh-btn-group" style="border: none">
                                                 {% if request.user.employee_get|is_department_manager:ticket or perms.helpdesk.change_comment or request.user.employee_get == item.comment.employee_id %}
@@ -709,7 +721,7 @@
                     $("#ohMessages").append(`
                     <div class="oh-alert-container">
                         <div class="oh-alert oh-alert--animated oh-alert--danger">
-                        {% trans "Something went wrong, the status was not updated." %}
+                        {% trans "Something went wrong, the status was not updated."|escapejs %}
                         </div>
                     </div>`
                     );

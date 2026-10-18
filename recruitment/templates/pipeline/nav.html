@@ -347,21 +347,6 @@
 
 <script>
     $(document).ready(function () {
-        Toast = Swal.mixin({
-            toast: true,
-            icon: "success",
-            title: "General Title",
-            animation: true,
-            position: "top-right",
-            showConfirmButton: false,
-            timer: 3000,
-            timerProgressBar: true,
-            didOpen: (toast) => {
-                toast.addEventListener("mouseenter", Swal.stopTimer);
-                toast.addEventListener("mouseleave", Swal.resumeTimer);
-            },
-        });
-
         function isNextStage(currentStageId, targetStageId, parsedStageOrder) {
             var currentStageIndex = parsedStageOrder.findIndex(stage => stage.id == currentStageId);
             var targetStageIndex = parsedStageOrder.findIndex(stage => stage.id == targetStageId);
@@ -401,10 +386,10 @@
                             if (!isNextStage(currentStageId, targetStageId, parsedStageOrder)) {
                                 if (sessionStorage.getItem('showRecuitmentKanbanConfirmation') !== 'false') {
                                     Swal.fire({
-                                        title: "Confirm Stage Change",
+                                        title: "{% trans 'Confirm Stage Change'|escapejs %}",
                                         html: `
                                             <p>The candidate is being moved from ${preStage.stage} to the ${currentStage.stage} stage. Do you want to proceed?</p>
-                                            <label><input type="checkbox" id="doNotShowAgain"> {% trans "Don't show this again in this session" %}</label>
+                                            <label><input type="checkbox" id="doNotShowAgain"> {% trans "Don't show this again in this session"|escapejs %}</label>
                                         `,
                                         icon: "warning",
                                         showCancelButton: true,
@@ -488,26 +473,18 @@
                         },
                         success: function (response) {
                             row.find('[name="stage_id"]').val(stageId);
-                            Toast.fire({
-                                icon: "success",
-                                title: '{% trans "Sequence updated" %}',
-                                position: "top-end",
-                            });
+                            $("#reloadMessagesButton").click();
                             if (response.message) {
                                 Swal.fire({
                                     title: response.message,
-                                    text: `Total vacancy is ${response.vacancy}.`,
+                                    text: "{% trans 'Total vacancy is'|escapejs %} " + response.vacancy + ".",
                                     icon: "info",
-                                    confirmButtonText: "Ok",
+                                    confirmButtonText: "{% trans 'Ok'|escapejs %}",
                                 });
                             }
                         },
                         error: function (xhr, status, error) {
-                            Toast.fire({
-                                icon: "error",
-                                title: '{% trans "Something went wrong" %}',
-                                position: "top-end",
-                            });
+                            $("#reloadMessagesButton").click();
                         },
                     });
                 }, 100);

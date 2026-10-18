@@ -31,28 +31,27 @@ SUGGESTED_REPORT_SLUGS: tuple[str, ...] = (
     "attendance-summary",
     "unscheduled-absence",
     "leave-liability",  # catalog: Open Leave Balance (Days)
-    "ot-concentration",  # department / KPI defaults; names gated
+    "overtime-analysis",  # department / KPI defaults; names gated
     "recruitment-funnel",
     "time-to-hire",
     "offer-acceptance",
     "pipeline-aging",
     "quality-of-hire",
-    "document-expiry",
     "document-expiry-aging",
 )
 
 # Priority order for the home "Pin recommended" action (subset of Suggested).
-# Cap still 6 favorites total — this only fills empty pin slots on click.
+# Cap still 10 favorites total — this only fills empty pin slots on click.
 DASHBOARD_PIN_PRIORITY_SLUGS: tuple[str, ...] = (
     "turnover-attrition",
     "time-to-hire",
-    "document-expiry",
+    "document-expiry-aging",
     "span-of-control",
-    "ot-concentration",
+    "overtime-analysis",
     "leave-liability",
 )
 
-MAX_DASHBOARD_REPORT_PINS = 6
+MAX_DASHBOARD_REPORT_PINS = 10
 
 
 def session_company_id(request) -> Optional[int]:

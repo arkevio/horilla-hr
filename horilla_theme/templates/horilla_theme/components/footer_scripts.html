@@ -7,11 +7,15 @@
 <script>
     document.body.addEventListener('htmx:configRequest', (event) => {
       event.detail.headers['X-CSRFToken'] = '{{ csrf_token }}'
+      if (event.detail.elt && event.detail.elt.closest && event.detail.elt.closest('[hx-push-url]')) {
+        event.detail.headers['HX-Push-Nav'] = 'true'
+      }
     })
 </script>
-<script src="{% static '/index/index.js' %}"></script>
+<script src="{% static '/index/index.js' %}?v=16"></script>
 <script src="{% static '/index/saveFilters.js' %}"></script>
-<script src="{% static 'horilla_theme/assets/js/htmxSelect2.js' %}"></script>
+<script src="{% static 'horilla_theme/assets/js/htmxSelect2.js' %}?v=10"></script>
+<script src="{% static 'src/js/componentForm.js' %}?v=1"></script>
 <script src="{% static 'build/js/summernote-lite.min.js' %}"></script>
 <script src="{% static '/index/country.js' %}"></script>
 
@@ -42,7 +46,7 @@
       window.history.replaceState({}, document.title, urlWithoutQuery)
     }
 </script>
-<script src="{% static 'horilla_theme/assets/js/footerScripts.js' %}"></script>
+<script src="{% static 'horilla_theme/assets/js/footerScripts.js' %}?v=2"></script>
 
 <!-- Product tour engine (horilla_tour) -->
 {% if request.user.is_authenticated %}

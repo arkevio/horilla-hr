@@ -2,7 +2,6 @@
 This page handles the cbv of leave requests page
 """
 
-import ast
 import contextlib
 from datetime import date
 from typing import Any
@@ -14,6 +13,7 @@ from django.shortcuts import get_object_or_404
 from django.urls import resolve, reverse, reverse_lazy
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 
 from base.cbv.penalty import ViewPenaltyList
 from base.decorators import manager_can_enter
@@ -65,29 +65,6 @@ class LeaveRequestsListView(HorillaListView):
         super().__init__(**kwargs)
         self.search_url = reverse("request-filter")
         self.view_id = "leaveRequest"
-        if self.request.user.has_perm("leave.change_leaverequest"):
-            self.bulk_update_fields = ["status"]
-
-    def handle_bulk_submission(self, request):
-        instance_ids = request.POST.getlist("instance_ids")
-        if (
-            instance_ids
-            and isinstance(instance_ids[0], str)
-            and instance_ids[0].startswith("[")
-        ):
-            instance_ids = ast.literal_eval(instance_ids[0])
-        instance_ids = [int(i) for i in instance_ids if str(i).isdigit()]
-        filtered_ids = []
-        for request_id in instance_ids:
-            leave_request = LeaveRequest.objects.get(id=request_id)
-            if leave_request.employee_id.id != request.user.employee_get.id:
-                filtered_ids.append(request_id)
-        if request.user.is_superuser:
-            filtered_ids = instance_ids
-        formatted_ids = [str(filtered_ids)]
-        request.POST = request.POST.copy()
-        request.POST.setlist("instance_ids", formatted_ids)
-        return super().handle_bulk_submission(request)
 
     def get_queryset(self):
         queryset = super().get_queryset()
@@ -208,6 +185,10 @@ class LeaveRequestsListView(HorillaListView):
     row_status_class = (
         "rejected-{status} cancelled-{status} requested-{status} approved-{status}"
     )
+
+    show_quick_date_filters = True
+    quick_date_fields = ("", "from_date", "to_date")
+
     # Mirrors LeaveRequestsNavView.nested_group_by_fields -- needed here
     # too since this (List) and Nav are separate classes; see the same
     # split in employee/cbv/employees.py's EmployeesList/EmployeeNav.
@@ -224,7 +205,7 @@ class LeaveRequestsListView(HorillaListView):
         ),
         ("employee_id__employee_work_info__department_id", _("Department")),
         ("employee_id__employee_work_info__job_position_id", _("Job Position")),
-        ("employee_id__employee_work_info__employee_type_id", _("Employement Type")),
+        ("employee_id__employee_work_info__employee_type_id", _("Employment Type")),
         ("employee_id__employee_work_info__company_id", _("Company")),
     ]
 
@@ -255,7 +236,27 @@ class LeaveRequestsNavView(HorillaNavView):
                     style="cursor: pointer;"
                 """,
             },
+            {
+                "action": _("Bulk Reject"),
+                "attrs": """
+                    onclick="bulkRejectLeaveRequests();"
+                    style="cursor: pointer;"
+                """,
+            },
         ]
+        if self.request.user.has_perm("leave.add_leaverequest"):
+            self.actions.insert(
+                0,
+                {
+                    "action": _("Import"),
+                    "attrs": """
+                        onclick="importLeaveRequest();"
+                        data-toggle="oh-modal-toggle"
+                        data-target="#leaveRequestImport"
+                        style="cursor: pointer;"
+                    """,
+                },
+            )
         if has_export_access(self.request, LeaveRequest):
             self.actions.append(
                 {
@@ -265,7 +266,6 @@ class LeaveRequestsNavView(HorillaNavView):
                     data-target = "#genericModal"
                     hx-target="#genericModalBody"
                     hx-get ="{reverse('leave-requests-nav-export')}"
-                    hx-vals='js:{{"has_selection": (JSON.parse(document.getElementById("selectedInstances")?.getAttribute("data-ids")||"[]").length>0)}}'
                     style="cursor: pointer;"
                 """,
                 }
@@ -296,6 +296,11 @@ class LeaveRequestsNavView(HorillaNavView):
     filter_body_template = "cbv/leave_requests/filter.html"
     filter_form_context_name = "form"
     search_swap_target = "#listContainer"
+    # Modern slide-over filter panel (horilla_nav.html's .oh-filter-modern
+    # styles) -- same treatment as every other panel this session.
+    # LeaveRequestFilter.ajax_fields carries the AJAX-loaded comboboxes
+    # this needs.
+    modern_filter = True
 
     group_by_fields = [
         ("employee_id", _("Employee")),
@@ -310,7 +315,7 @@ class LeaveRequestsNavView(HorillaNavView):
         ),
         ("employee_id__employee_work_info__department_id", _("Department")),
         ("employee_id__employee_work_info__job_position_id", _("Job Position")),
-        ("employee_id__employee_work_info__employee_type_id", _("Employement Type")),
+        ("employee_id__employee_work_info__employee_type_id", _("Employment Type")),
         ("employee_id__employee_work_info__company_id", _("Company")),
     ]
     # Mirrors LeaveRequestsListView.nested_group_by_fields below -- List
@@ -333,7 +338,7 @@ class LeaveRequestsNavView(HorillaNavView):
         ),
         ("employee_id__employee_work_info__department_id", _("Department")),
         ("employee_id__employee_work_info__job_position_id", _("Job Position")),
-        ("employee_id__employee_work_info__employee_type_id", _("Employement Type")),
+        ("employee_id__employee_work_info__employee_type_id", _("Employment Type")),
         ("employee_id__employee_work_info__company_id", _("Company")),
     ]
 
@@ -358,7 +363,6 @@ class LeaveRequestsExportNav(TemplateView):
         context = super().get_context_data(**kwargs)
         context["export_form"] = export_form
         context["export_filter"] = export_filter
-        context["hide_export_filters"] = self.request.GET.get("has_selection") == "true"
         return context
 
 
@@ -400,6 +404,8 @@ class LeaveRequestsDetailView(HorillaDetailedView):
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
+        if not self.instance:
+            return context
         body = list(self.body)
 
         if self.instance.multiple_approvals:
@@ -432,6 +438,18 @@ class LeaveRequestFormView(HorillaFormView):
     form_class = LeaveRequestCreationForm
     template_name = "cbv/leave_requests/form/inherit.html"
     new_display_title = _("Leave Request")
+
+    def get_queryset(self):
+        # The base class loads any pk; manager_can_enter above only checks
+        # that the user manages *someone*. None makes it answer "not found".
+        from leave.views import _may_act_on_leave_request
+
+        instance = super().get_queryset()
+        if instance and not _may_act_on_leave_request(
+            self.request, instance, "leave.change_leaverequest", owner_allowed=True
+        ):
+            return None
+        return instance
 
     def get_initial(self) -> dict:
         initial = super().get_initial()
@@ -528,11 +546,10 @@ class LeaveRequestFormView(HorillaFormView):
                         notify.send(
                             self.request.user.employee_get,
                             recipient=leave_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                            verb=f"Leave request updated for {leave_request.employee_id}.",
-                            verb_ar=f"تم تحديث طلب الإجازة لـ {leave_request.employee_id}.",
-                            verb_de=f"Urlaubsantrag aktualisiert für {leave_request.employee_id}.",
-                            verb_es=f"Solicitud de permiso actualizada para {leave_request.employee_id}.",
-                            verb_fr=f"Demande de congé mise à jour pour {leave_request.employee_id}.",
+                            verb=gettext_noop(
+                                "Leave request updated for %(employee)s."
+                            ),
+                            verb_params={"employee": str(leave_request.employee_id)},
                             icon="people-circle",
                             redirect=reverse("request-view")
                             + f"?id={leave_request.id}",
@@ -588,11 +605,9 @@ class LeaveRequestFormView(HorillaFormView):
                             notify.send(
                                 self.request.user.employee_get,
                                 recipient=managers[0],
-                                verb="You have a new leave request to validate.",
-                                verb_ar="لديك طلب إجازة جديد يجب التحقق منه.",
-                                verb_de="Sie haben eine neue Urlaubsanfrage zur Validierung.",
-                                verb_es="Tiene una nueva solicitud de permiso que debe validar.",
-                                verb_fr="Vous avez une nouvelle demande de congé à valider.",
+                                verb=gettext_noop(
+                                    "You have a new leave request to validate."
+                                ),
                                 icon="people-circle",
                                 redirect=f"/leave/request-view?id={leave_request.id}",
                             )
@@ -608,11 +623,10 @@ class LeaveRequestFormView(HorillaFormView):
                         notify.send(
                             self.request.user.employee_get,
                             recipient=leave_request.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
-                            verb=f"New leave request created for {leave_request.employee_id}.",
-                            verb_ar=f"تم إنشاء طلب إجازة جديد لـ {leave_request.employee_id}.",
-                            verb_de=f"Neuer Urlaubsantrag erstellt für {leave_request.employee_id}.",
-                            verb_es=f"Nueva solicitud de permiso creada para {leave_request.employee_id}.",
-                            verb_fr=f"Nouvelle demande de congé créée pour {leave_request.employee_id}.",
+                            verb=gettext_noop(
+                                "New leave request created for %(employee)s."
+                            ),
+                            verb_params={"employee": str(leave_request.employee_id)},
                             icon="people-circle",
                             redirect=reverse("request-view")
                             + f"?id={leave_request.id}",
@@ -623,15 +637,23 @@ class LeaveRequestFormView(HorillaFormView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 class LeaveClashListView(LeaveRequestsListView):
     """
     list view of leave clash col
     """
 
+    def dispatch(self, request, *args, **kwargs):
+        if not LeaveRequest.objects.filter(id=kwargs.get("pk")).exists():
+            return HttpResponse()
+        return super().dispatch(request, *args, **kwargs)
+
     def get_queryset(self):
         queryset = HorillaListView.get_queryset(self)
         pk = self.kwargs.get("pk")
-        record = LeaveRequest.objects.get(id=pk)
+        record = LeaveRequest.objects.filter(id=pk).first()
+        if not record:
+            return queryset.none()
         if record.status != "rejected" or record.status != "cancelled":
             queryset = (
                 queryset.filter(
@@ -654,10 +676,11 @@ class LeaveClashListView(LeaveRequestsListView):
         col
         for col in LeaveRequestsListView.columns
         if col[1] not in ["leave_clash_col", "penality_col", "actions_col"]
-    ] + [(_("Clased Due To"), "clashed_due_to")]
+    ] + [(_("Clashed Due To"), "clashed_due_to")]
 
     row_status_class = ""
     row_status_indications = None
+    show_quick_date_filters = False
     bulk_select_option = None
     row_attrs = ""
 

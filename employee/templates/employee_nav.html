@@ -1,4 +1,11 @@
 {% load static i18n %}
+{% comment %}
+    employee_filters.html (included further down via the Filter dropdown)
+    uses .oh-segmented/.oh-select-ajax styling for Is Active and the
+    AJAX-loaded fields -- this partial provides that CSS/JS, same as
+    attendance/work_record/work_record_view.html and horilla_nav.html.
+{% endcomment %}
+{% include 'generic/modern_filter_panel.html' %}
 
 <style>
     #progress {
@@ -374,7 +381,7 @@
         $(".filterButton").click();
     }
     function clearAllFilter(element) {
-        $('[role="tooltip"]').remove();
+        $('[role="tooltip"]:not(.apexcharts-tooltip)').remove();
         let field_ids = $("[data-x-field]");
         for (var i = 0; i < field_ids.length; i++) {
             let item_id = field_ids[i].getAttribute("data-x-field");

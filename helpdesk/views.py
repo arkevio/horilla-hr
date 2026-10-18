@@ -15,6 +15,7 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext as _
+from django.utils.translation import gettext_noop
 from django.views.decorators.http import require_http_methods
 
 from base.forms import TagsForm
@@ -70,7 +71,7 @@ from horilla.decorators import (
     permission_required,
 )
 from horilla.group_by import group_by_queryset
-from horilla.http.response import HorillaRedirect
+from horilla.http.response import HorillaRedirect, with_bulk_result
 from horilla.methods import handle_no_permission
 from notifications.signals import notify
 
@@ -308,7 +309,6 @@ def faq_update(request, obj_id):
 
 
 @login_required
-@hx_request_required
 def faq_search(request):
     """
     This function is responsible for search and filter the FAQ.
@@ -320,7 +320,15 @@ def faq_search(request):
     GET : return faq filter form template
     POST : return faq view
     """
-    id = request.GET.get("cat_id", "")
+    # A genuine top-level navigation/reload should land on the real FAQ page,
+    # not this list/filter fragment.
+    if request.headers.get("Sec-Fetch-Mode") == "navigate":
+        redirect_url = reverse("faq-category-view")
+        query_string = request.GET.urlencode()
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return redirect(redirect_url)
+    id = request.GET.get("cat_id") or 0
     category = request.GET.get("category", "")
     previous_data = request.GET.urlencode()
     query = request.GET.get("search", "")
@@ -409,7 +417,7 @@ def faq_delete(request, id):
         message = _("No FAQ found matching the query.")
 
     except ProtectedError:
-        messages = _("You cannot delete this FAQ.")
+        message = _("You cannot delete this FAQ.")
 
     return HorillaRedirect(request, message=message)
 
@@ -521,11 +529,7 @@ def ticket_create(request):
             notify.send(
                 request.user.employee_get,
                 recipient=assignees,
-                verb="You have been assigned to a new Ticket",
-                verb_ar="لقد تم تعيينك لتذكرة جديدة",
-                verb_de="Ihnen wurde ein neues Ticket zugewiesen",
-                verb_es="Se te ha asignado un nuevo ticket",
-                verb_fr="Un nouveau ticket vous a été attribué",
+                verb=gettext_noop("You have been assigned to a new Ticket"),
                 icon="infinite",
                 redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
             )
@@ -642,11 +646,8 @@ def ticket_status_change(request, ticket_id):
     notify.send(
         request.user.employee_get,
         recipient=assignees,
-        verb=f"The status of the ticket has been changed to {ticket.status}.",
-        verb_ar="تم تغيير حالة التذكرة.",
-        verb_de="Der Status des Tickets wurde geändert.",
-        verb_es="El estado del ticket ha sido cambiado.",
-        verb_fr="Le statut du ticket a été modifié.",
+        verb=gettext_noop("The status of the ticket has been changed to %(status)s."),
+        verb_params={"status": str(ticket.status)},
         icon="infinite",
         redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
     )
@@ -717,11 +718,10 @@ def change_ticket_status(request, ticket_id):
             notify.send(
                 request.user.employee_get,
                 recipient=assignees,
-                verb=f"The status of the ticket has been changed to {ticket.status}.",
-                verb_ar="تم تغيير حالة التذكرة.",
-                verb_de="Der Status des Tickets wurde geändert.",
-                verb_es="El estado del ticket ha sido cambiado.",
-                verb_fr="Le statut du ticket a été modifié.",
+                verb=gettext_noop(
+                    "The status of the ticket has been changed to %(status)s."
+                ),
+                verb_params={"status": str(ticket.status)},
                 icon="infinite",
                 redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
             )
@@ -776,11 +776,7 @@ def ticket_delete(request, ticket_id):
             notify.send(
                 request.user.employee_get,
                 recipient=assignees,
-                verb=f"The ticket has been deleted.",
-                verb_ar="تم حذف التذكرة.",
-                verb_de="Das Ticket wurde gelöscht",
-                verb_es="El billete ha sido eliminado.",
-                verb_fr="Le ticket a été supprimé.",
+                verb=gettext_noop("The ticket has been deleted."),
                 icon="infinite",
                 redirect=reverse("ticket-view"),
             )
@@ -1078,7 +1074,9 @@ def ticket_update_tag(request):
 @login_required
 @hx_request_required
 def ticket_change_raised_on(request, ticket_id):
-    ticket = Ticket.objects.get(id=ticket_id)
+    ticket = Ticket.objects.filter(id=ticket_id).first()
+    if not ticket:
+        return HttpResponse()
     if (
         request.user.has_perm("helpdesk.view_ticket")
         or request.user.employee_get == ticket.employee_id
@@ -1102,7 +1100,9 @@ def ticket_change_raised_on(request, ticket_id):
 @login_required
 @hx_request_required
 def ticket_change_assignees(request, ticket_id):
-    ticket = Ticket.objects.get(id=ticket_id)
+    ticket = Ticket.objects.filter(id=ticket_id).first()
+    if not ticket:
+        return HttpResponse()
     if request.user.has_perm("helpdesk.change_ticket") or is_department_manager(
         request, ticket
     ):
@@ -1188,7 +1188,9 @@ def remove_tag(request):
         # message = messages.success(request,_("Success"))
         message = _("success")
         type = "success"
-    except:
+    except (Ticket.DoesNotExist, Tags.DoesNotExist):
+        # Narrowed from a bare except, which silently swallowed genuine tags.remove() failures too.
+        logger.warning("tag removal failed: ticket_id=%r tag_id=%r", ticket_id, tag_id)
         message = messages.error(request, _("Failed"))
         type = "failed"
 
@@ -1380,7 +1382,7 @@ def comment_edit(request):
         messages.success(request, _("The comment updated successfully."))
 
     else:
-        messages.error(request, _("The comment needs to be atleast 2 charactors."))
+        messages.error(request, _("The comment needs to be at least 2 characters."))
     response = {
         "errors": "no_error",
     }
@@ -1445,7 +1447,8 @@ def get_raised_on(request):
 @login_required
 def claim_ticket(request, id):
     """
-    This is a function to create a claim request for requested employee
+    This is a function for an employee to claim an unassigned ticket -
+    assigns them to the ticket immediately, no approval needed.
     """
     ticket = Ticket.find(id)
     if not ticket:
@@ -1453,15 +1456,41 @@ def claim_ticket(request, id):
             request, message=_("No Ticket found matching the query.")
         )
 
-    if not ClaimRequest.objects.filter(
-        employee_id=request.user.employee_get, ticket_id=ticket
-    ).exists():
-        ClaimRequest(employee_id=request.user.employee_get, ticket_id=ticket).save()
+    employee = request.user.employee_get
+    if employee not in ticket.assigned_to.all():
+        ticket.assigned_to.add(employee)
+        ticket.save()
+        try:
+            notify.send(
+                employee,
+                recipient=employee.employee_user_id,
+                verb=gettext_noop("You have been assigned to a new Ticket-%(ticket)s."),
+                verb_params={"ticket": str(ticket)},
+                icon="infinite",
+                redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
+            )
+        except Exception as e:
+            logger.error(e)
+        if ticket.employee_id != employee:
+            try:
+                notify.send(
+                    employee,
+                    recipient=ticket.employee_id.employee_user_id,
+                    verb=gettext_noop(
+                        "%(employee)s assigned to your ticket - %(ticket)s."
+                    ),
+                    verb_params={"employee": str(employee), "ticket": str(ticket)},
+                    icon="infinite",
+                    redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
+                )
+            except Exception as e:
+                logger.error(e)
+        messages.success(request, _("Ticket claimed successfully."))
     return HorillaRedirect(request)
 
 
 @login_required
-@ticket_owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
+@ticket_owner_can_enter(perm="helpdesk.change_ticket", model=ClaimRequest)
 def approve_claim_request(request, req_id):
     """
     Function for approve claim request and send notifications to the responsibles.
@@ -1470,19 +1499,20 @@ def approve_claim_request(request, req_id):
     if not claim_request:
         return HttpResponse("Invalid claim request", status=404)
 
+    ticket = claim_request.ticket_id
+    employee = claim_request.employee_id
+
     if not (
         request.user.has_perm("helpdesk.change_claimrequest")
         or request.user.has_perm("helpdesk.change_ticket")
         or is_department_manager(request, ticket)
     ):
-        handle_no_permission(request)
+        return handle_no_permission(request)
 
     approve = strtobool(
         request.GET.get("approve", "False")
     )  # Safely convert to boolean
 
-    ticket = claim_request.ticket_id
-    employee = claim_request.employee_id
     refresh = False
     if approve:
         # message
@@ -1495,27 +1525,31 @@ def approve_claim_request(request, req_id):
                 notify.send(
                     request.user.employee_get,
                     recipient=employee.employee_user_id,
-                    verb=f"You have been assigned to a new Ticket-{ticket}.",
-                    verb_ar=f"لقد تم تعيينك لتذكرة جديدة {ticket}.",
-                    verb_de=f"Ihnen wurde ein neues Ticket {ticket} zugewiesen.",
-                    verb_es=f"Se te ha asignado un nuevo ticket {ticket}.",
-                    verb_fr=f"Un nouveau ticket {ticket} vous a été attribué.",
+                    verb=gettext_noop(
+                        "You have been assigned to a new Ticket-%(ticket)s."
+                    ),
+                    verb_params={"ticket": str(ticket)},
                     icon="infinite",
                     redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
                 )
             except Exception as e:
                 logger.error(e)
-            if not ticket.employee_id == ticket.created_by.employee_get:
-                for emp in [ticket.created_by.employee_get, ticket.employee_id]:
+            # created_by can be None (SET_NULL) for tickets not created through a request,
+            # or whose creator was since deleted; notify the raiser alone in that case.
+            raiser = ticket.created_by.employee_get if ticket.created_by else None
+            if raiser is not None and raiser != ticket.employee_id:
+                for emp in [raiser, ticket.employee_id]:
                     try:
                         notify.send(
                             request.user.employee_get,
                             recipient=emp.employee_user_id,
-                            verb=f"{employee} assigned to your ticket - {ticket}.",
-                            verb_ar=f"تم تعيين {employee} إلى تذكرتك - {ticket}.",
-                            verb_de=f"{employee} wurde Ihrem Ticket {ticket} zugewiesen.",
-                            verb_es=f"{employee} ha sido asignado a tu ticket - {ticket}.",
-                            verb_fr=f"{employee} a été assigné à votre ticket - {ticket}.",
+                            verb=gettext_noop(
+                                "%(employee)s assigned to your ticket - %(ticket)s."
+                            ),
+                            verb_params={
+                                "employee": str(employee),
+                                "ticket": str(ticket),
+                            },
                             icon="infinite",
                             redirect=reverse(
                                 "ticket-detail", kwargs={"ticket_id": ticket.id}
@@ -1527,11 +1561,10 @@ def approve_claim_request(request, req_id):
                 notify.send(
                     request.user.employee_get,
                     recipient=ticket.employee_id.employee_user_id,
-                    verb=f"{employee} assigned to your ticket - {ticket}.",
-                    verb_ar=f"تم تعيين {employee} إلى تذكرتك - {ticket}.",
-                    verb_de=f"{employee} wurde Ihrem Ticket {ticket} zugewiesen.",
-                    verb_es=f"{employee} ha sido asignado a tu ticket - {ticket}.",
-                    verb_fr=f"{employee} a été assigné à votre ticket - {ticket}.",
+                    verb=gettext_noop(
+                        "%(employee)s assigned to your ticket - %(ticket)s."
+                    ),
+                    verb_params={"employee": str(employee), "ticket": str(ticket)},
                     icon="infinite",
                     redirect=reverse("ticket-detail", kwargs={"ticket_id": ticket.id}),
                 )
@@ -1548,11 +1581,10 @@ def approve_claim_request(request, req_id):
             notify.send(
                 request.user.employee_get,
                 recipient=employee.employee_user_id,
-                verb=f"Your claim request is rejected for Ticket-{ticket}",
-                verb_ar=f"تم رفض طلبك للمطالبة بالتذكرة {ticket}.",
-                verb_de=f"Ihre Anspruchsanfrage für Ticket-{ticket} wurde abgelehnt.",
-                verb_es=f"Tu solicitud de reclamación ha sido rechazada para el ticket {ticket}.",
-                verb_fr=f"Votre demande de réclamation pour le ticket {ticket} a été rejetée.",
+                verb=gettext_noop(
+                    "Your claim request is rejected for Ticket-%(ticket)s"
+                ),
+                verb_params={"ticket": str(ticket)},
                 icon="infinite",
             )
     ticket.save()
@@ -1616,22 +1648,17 @@ def tickets_bulk_archive(request):
     is_active = False
     if request.GET.get("is_active") == "True":
         is_active = True
+    done = failed = 0
     for ticket_id in ids:
-        ticket = Ticket.objects.get(id=ticket_id)
+        ticket = Ticket.objects.filter(id=ticket_id).first()
+        if ticket is None:
+            failed += 1
+            continue
         ticket.is_active = is_active
         ticket.save()
-    messages.success(request, _("The Ticket updated successfully."))
-    previous_url = request.META.get("HTTP_REFERER", "/")
-
-    # Prevent XSS / open redirect
-    if not url_has_allowed_host_and_scheme(
-        previous_url,
-        allowed_hosts={request.get_host()},
-        require_https=request.is_secure(),
-    ):
-        previous_url = "/"
-
-    return redirect(previous_url)
+        done += 1
+    # The caller reloads the page itself; the counts feed the result dialog.
+    return with_bulk_result(JsonResponse({"message": "Success"}), done, failed)
 
 
 @login_required
@@ -1664,11 +1691,7 @@ def tickets_bulk_delete(request):
             notify.send(
                 request.user.employee_get,
                 recipient=assignees,
-                verb=f"The ticket has been deleted.",
-                verb_ar="تم حذف التذكرة.",
-                verb_de="Das Ticket wurde gelöscht",
-                verb_es="El billete ha sido eliminado.",
-                verb_fr="Le ticket a été supprimé.",
+                verb=gettext_noop("The ticket has been deleted."),
                 icon="infinite",
                 redirect=reverse("ticket-view"),
             )
@@ -1714,7 +1737,9 @@ def create_department_manager(request):
 @hx_request_required
 @permission_required("helpdesk.change_departmentmanager")
 def update_department_manager(request, dep_id):
-    department_manager = DepartmentManager.objects.get(id=dep_id)
+    department_manager = DepartmentManager.objects.filter(id=dep_id).first()
+    if not department_manager:
+        return HttpResponse()
     form = DepartmentManagerCreateForm(instance=department_manager)
     if request.method == "POST":
         form = DepartmentManagerCreateForm(request.POST, instance=department_manager)
@@ -1739,10 +1764,8 @@ def delete_department_manager(request, dep_id):
         )
 
     count = DepartmentManager.objects.count()
-    # Soft delete: this record is also read directly (bypassing the
-    # is_active-filtering manager) by the base Department settings page to
-    # display the assigned manager, so removing it here should only hide it
-    # from Helpdesk's own list, not clear the manager shown there.
+    # Soft delete: the base Department settings page reads this record directly
+    # (bypassing is_active filtering), so this should only hide it from Helpdesk's own list.
     department_manager.is_active = False
     department_manager.save()
     messages.success(request, _("The department manager has been deleted successfully"))
@@ -1767,13 +1790,7 @@ def update_priority(request, ticket_id):
             request, message=_("No Ticket found matching the query.")
         )
 
-    if (
-        request.user.has_perm("helpdesk.view_ticket")
-        or ticket.employee_id.get_reporting_manager() == request.user.employee_get
-        or is_department_manager(request, ticket)
-        or request.user.employee_get == ticket.employee_id
-        or request.user.employee_get in ticket.assigned_to.all()
-    ):
+    if ticket.can_manage_priority():
         rating = request.POST.get("rating")
 
         if rating == "1":
@@ -1786,6 +1803,30 @@ def update_priority(request, ticket_id):
         messages.success(request, _("Priority updated successfully."))
         return HorillaRedirect(request)
     return handle_no_permission(request)
+
+
+@login_required
+@ticket_owner_can_enter(perm="helpdesk.change_ticket", model=Ticket)
+def update_deadline(request, ticket_id):
+    """
+    This function is used to update the deadline from the detailed view
+    """
+    ticket = Ticket.find(ticket_id)
+    if not ticket:
+        return HorillaRedirect(
+            request, message=_("No Ticket found matching the query.")
+        )
+    if not ticket.can_manage_priority():
+        return handle_no_permission(request)
+    value = request.POST.get("deadline", "").strip()
+    try:
+        ticket.deadline = datetime.strptime(value, "%Y-%m-%d").date() if value else None
+    except ValueError:
+        messages.error(request, _("Invalid date."))
+        return HorillaRedirect(request)
+    ticket.save()
+    messages.success(request, _("Deadline updated successfully."))
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1843,7 +1884,9 @@ def ticket_type_update(request, t_type_id):
     """
     This method renders form and template to create Ticket type
     """
-    ticket_type = TicketType.objects.get(id=t_type_id)
+    ticket_type = TicketType.objects.filter(id=t_type_id).first()
+    if not ticket_type:
+        return HttpResponse()
     form = TicketTypeForm(instance=ticket_type)
     if request.method == "POST":
         form = TicketTypeForm(request.POST, instance=ticket_type)
@@ -1875,7 +1918,8 @@ def ticket_type_delete(request, t_type_id):
                 return HttpResponse(
                     "<script>$('#reloadMessagesButton').click()</script>"
                 )
-        except:
+        except ProtectedError:
+            # Related tickets still reference this type.
             messages.error(request, _("Ticket type can not delete"))
             return HttpResponse("<script>$('.reload-record').click()</script>")
     return HttpResponse("<script>$('#reloadMessagesButton').click()</script>")

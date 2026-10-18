@@ -112,9 +112,6 @@ class SurveyTemplate(HorillaModel):
 class Skill(HorillaModel):
     title = models.CharField(max_length=100)
 
-    def __str__(self):
-        return self.title
-
     def save(self, *args, **kwargs):
         title = self.title
         self.title = title.capitalize()
@@ -185,7 +182,7 @@ class Recruitment(HorillaModel):
             "To publish a recruitment in website, if false then it \
             will not appear on open recruitment page."
         ),
-        verbose_name=_("Is Published"),
+        verbose_name=_("Published"),
     )
     open_positions = models.ManyToManyField(
         JobPosition,
@@ -453,7 +450,7 @@ class Stage(HorillaModel):
         ("applied", _("Applied")),
         ("test", _("Test")),
         ("interview", _("Interview")),
-        ("cancelled", _("Cancelled")),
+        ("cancelled", _("Rejected")),
         ("hired", _("Hired")),
     ]
     recruitment_id = models.ForeignKey(
@@ -642,6 +639,17 @@ class Candidate(HorillaModel):
         ("software", _("Inside software")),
         ("other", _("Other")),
     ]
+    referral_source_choices = [
+        ("job_board", _("Job Boards")),
+        ("company_career_site", _("Company Career Site")),
+        ("social_media", _("Social Media")),
+        ("employee_referral", _("Employee Referral")),
+        ("recruiter_headhunter", _("Recruiter / Headhunter")),
+        ("search_engine", _("Search Engine")),
+        ("college_university", _("College or University")),
+        ("advertisement_event", _("Advertisement / Event")),
+        ("other", _("Other")),
+    ]
     name = models.CharField(max_length=100, null=True, verbose_name=_("Name"))
     profile = models.ImageField(upload_to=upload_path, null=True)  # 853
     portfolio = models.URLField(max_length=200, blank=True, verbose_name=_("Portfolio"))
@@ -730,6 +738,19 @@ class Candidate(HorillaModel):
         blank=True,
         verbose_name=_("Source"),
     )
+    referral_source = models.CharField(
+        max_length=20,
+        choices=referral_source_choices,
+        null=True,
+        blank=True,
+        verbose_name=_("How Did You Hear About Us?"),
+    )
+    referral_source_other = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        verbose_name=_("Please Specify"),
+    )
     start_onboard = models.BooleanField(
         default=False, verbose_name=_("Start Onboarding")
     )
@@ -772,6 +793,11 @@ class Candidate(HorillaModel):
         """
         Stage drop down
         """
+        # stage_id is nullable (e.g. a candidate already converted to an
+        # employee) - there's no recruitment to pull sibling stages from,
+        # so there's nothing to build a dropdown out of.
+        if self.stage_id is None:
+            return ""
         request = getattr(_thread_locals, "request", None)
         all_rec_stages = getattr(request, "all_rec_stages", {})
         if all_rec_stages.get(self.stage_id.recruitment_id.pk) is None:
@@ -850,9 +876,20 @@ class Candidate(HorillaModel):
         return self.resume.url
 
     def onboarding_portal_html(self):
+        # A hired candidate has no OnboardingPortal row until HR actually
+        # sends them the portal invite (see the Candidates list's "Portal
+        # Not-Sent" filter) -- that's an expected, common state, not an
+        # error, so render a neutral placeholder instead of crashing.
+        try:
+            count = self.onboarding_portal.count
+        except ObjectDoesNotExist:
+            return format_html(
+                '<div class="oh-checkpoint-badge oh-checkpoint-badge--light">{}</div>',
+                _("Not sent"),
+            )
         return format_html(
             '<div class="oh-checkpoint-badge oh-checkpoint-badge--secondary">{}/4</div>',
-            self.onboarding_portal.count,
+            count,
         )
 
     def rating(self):
@@ -879,10 +916,18 @@ class Candidate(HorillaModel):
         """
         This method for get custome coloumn for tasks.
         """
-        from onboarding.models import CandidateStage, CandidateTask
+        from onboarding.models import CandidateTask
 
-        cand_stage = self.onboarding_stage.id
-        cand_stage_obj = CandidateStage.objects.get(id=cand_stage)
+        # Same "not started onboarding yet" state as onboarding_portal_html
+        # above -- a hired candidate has no CandidateStage until the portal
+        # invite is sent, so this reverse accessor legitimately has nothing
+        # to return yet rather than being a data error.
+        try:
+            cand_stage_obj = self.onboarding_stage
+        except ObjectDoesNotExist:
+            return format_html(
+                '<span class="text-muted">{}</span>', _("Onboarding not started yet")
+            )
         choices = CandidateTask.choice
 
         return render_template(
@@ -914,9 +959,9 @@ class Candidate(HorillaModel):
             context={"instance": self},
         )
 
-    def options(self):
+    def actions_col(self):
         """
-        This method for get custom coloumn for options.
+        This method for get custom column for actions.
         """
 
         request = getattr(_thread_locals, "request", None)
@@ -931,18 +976,8 @@ class Candidate(HorillaModel):
         )
 
         return render_template(
-            path="cbv/candidates/option.html",
-            context={"instance": self, "emp_list": emp_list},
-        )
-
-    def actions_col(self):
-        """
-        This method for get custom column for actions.
-        """
-
-        return render_template(
             path="cbv/candidates/actions.html",
-            context={"instance": self},
+            context={"instance": self, "emp_list": emp_list},
         )
 
     def get_profile_url(self):
@@ -1158,6 +1193,7 @@ class Candidate(HorillaModel):
         """
         return get_diff(self)
 
+    @cached_property
     def get_last_sent_mail(self):
         """
         This method is used to get last send mail
@@ -1815,21 +1851,12 @@ class InterviewSchedule(HorillaModel):
         blank=True,
     )
     completed = models.BooleanField(
-        default=False, verbose_name=_("Is Interview Completed")
+        default=False, verbose_name=_("Interview Completed")
     )
     objects = HorillaCompanyManager("candidate_id__recruitment_id__company_id")
 
     def __str__(self) -> str:
         return f"{self.candidate_id} -Interview."
-
-    def candidate_custom_col(self):
-        """
-        method for candidate coloumn
-        """
-        return render_template(
-            path="cbv/interview/candidate_custom_col.html",
-            context={"instance": self},
-        )
 
     def interviewer_custom_col(self):
         """
@@ -1839,27 +1866,6 @@ class InterviewSchedule(HorillaModel):
             path="cbv/interview/interviewer_custom_col.html",
             context={"instance": self},
         )
-
-    def custom_color(self):
-        """
-        Custom background color for all rows with hover effect
-        """
-        # interviews = InterviewSchedule.objects.filter(
-        #     employee_id=self.user.employee_get.id
-        # )
-        request = getattr(_thread_locals, "request", None)
-        if not getattr(self, "request", None):
-            self.request = request
-        user = request.user
-        if user.employee_get in self.employee_id.all():
-            color = "rgba(255, 166, 0, 0.158)"
-            hovering = "white"
-
-            return (
-                f'style="background-color: {color};" '
-                f"onmouseover=\"this.style.backgroundColor='{hovering}';\" "
-                f"onmouseout=\"this.style.backgroundColor='{color}';\""
-            )
 
     def interviewer_detail(self):
         """
@@ -1886,6 +1892,22 @@ class InterviewSchedule(HorillaModel):
         else:
             return _("None")
 
+    def interview_state(self):
+        """
+        Return completed, expired, today_passed, today_upcoming or upcoming.
+        """
+        if self.completed:
+            return "completed"
+        now = tz.localtime() if settings.USE_TZ else datetime.now()
+        now = now.replace(tzinfo=None)
+        if self.interview_date < now.date():
+            return "expired"
+        if self.interview_date > now.date():
+            return "upcoming"
+        if datetime.combine(self.interview_date, self.interview_time) < now:
+            return "today_passed"
+        return "today_upcoming"
+
     def status_custom_col(self):
         """
         method for status coloumn
@@ -1893,7 +1915,7 @@ class InterviewSchedule(HorillaModel):
         now = datetime.now(tz=timezone.utc if settings.USE_TZ else None)
         return render_template(
             path="cbv/interview/status_custom_col.html",
-            context={"instance": self, "now": now},
+            context={"instance": self, "now": now, "state": self.interview_state()},
         )
 
     def custom_action_col(self):
@@ -2069,6 +2091,11 @@ class LinkedInAccount(HorillaModel):
     company_id = models.ForeignKey(
         Company, on_delete=models.CASCADE, null=True, verbose_name=_("Company")
     )
+    # This row holds an api_token, and the detail/delete views fetch it by raw
+    # pk (recruitment/cbvs.py, recruitment/views/linkedin.py) with no company
+    # check of their own -- an IDOR on a credential. Scoping the manager fixes
+    # every one of those call sites at once.
+    objects = HorillaCompanyManager()
 
     class Meta:
         verbose_name = _("LinkedIn Account")
@@ -2082,7 +2109,7 @@ class LinkedInAccount(HorillaModel):
         url = "https://api.linkedin.com/v2/userinfo"
         headers = {"Authorization": f"Bearer {self.api_token}"}
 
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, timeout=30)
 
         if response.status_code == 200:
             data = response.json()

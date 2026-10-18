@@ -13,6 +13,7 @@ from django.shortcuts import render
 from django.urls import reverse, reverse_lazy
 from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 
 from base.filters import ShiftRequestFilter
 from base.forms import (
@@ -129,7 +130,9 @@ class ShiftRequestList(ShiftList):
             queryset.filter(reallocate_to__isnull=True),
             "base.view_shiftrequest",
         )
-        queryset = queryset | data.filter(employee_id=employee)
+        queryset = queryset | data.filter(
+            employee_id=employee, reallocate_to__isnull=True
+        )
         queryset = queryset.filter(employee_id__is_active=True)
 
         return queryset
@@ -314,7 +317,6 @@ class ShitRequestNav(HorillaNavView):
                     data-target="#genericModal"
                     hx-get="{reverse('shift-export')}"
                     hx-target="#genericModalBody"
-                    hx-vals='js:{{"has_selection": (JSON.parse(document.getElementById("shiftselectedInstances")?.getAttribute("data-ids")||"[]").length>0 || JSON.parse(document.getElementById("allocatedselectedInstances")?.getAttribute("data-ids")||"[]").length>0)}}'
                     style="cursor: pointer;"
                     """,
                 },
@@ -372,7 +374,6 @@ class ExportView(TemplateView):
         export_filter = ShiftRequestFilter(queryset=shift_requests)
         context["export_fields"] = export_fields
         context["export_filter"] = export_filter
-        context["hide_export_filters"] = self.request.GET.get("has_selection") == "true"
         return context
 
 
@@ -397,7 +398,7 @@ class ShiftRequestDetailview(HorillaDetailedView):
         (_("Previous Shift"), "previous_shift_id"),
         (_("Requested Date"), "requested_date"),
         (_("Requested Till"), "requested_till"),
-        (_("Is permenent shift"), "is_permanent"),
+        (_("Permenent shift"), "is_permanent"),
         (_("Description"), "description"),
     ]
 
@@ -407,17 +408,13 @@ class ShiftRequestDetailview(HorillaDetailedView):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.action_method = "detail_confirmations"
-
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        if (
-            self.request.user.employee_get == self.instance.employee_id
-            and not self.request.GET.get("dashboard")
-        ):
-            context["action_method"] = "detail_actions"
-
-        return context
+        # shift_detail_confirm_action.html carries the same per-role
+        # conditions as the row's shift_actions() actions (Edit/Duplicate/
+        # Remove/Approve/Reject), so there's no need to swap templates by
+        # viewer role here - it was previously split into detail_confirmations
+        # (manager-only Approve/Reject) and detail_actions (owner-only Edit/
+        # Delete), which meant no viewer ever saw the full row button set.
+        self.action_method = "shift_detail_confirm_action"
 
 
 @method_decorator(login_required, name="dispatch")
@@ -435,6 +432,10 @@ class AllocatedShiftDetailView(ShiftRequestDetailview):
         (_("Requested Till"), "requested_till"),
         (_("Description"), "description"),
     ]
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.action_method = "allocated_detail_confirm_action"
 
 
 class ShiftTypeFormView(HorillaFormView):
@@ -538,18 +539,11 @@ class ShiftRequestFormView(HorillaFormView):
                 with contextlib.suppress(Exception):
                     notify.send(
                         instance.employee_id,
-                        recipient=(
-                            instance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
+                        recipient=instance.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
+                        verb=gettext_noop(
+                            "You have new shift request to approve for %(employee)s"
                         ),
-                        verb=f"You have new shift request to approve \
-                            for {instance.employee_id}",
-                        verb_ar=f"لديك طلب وردية جديد للموافقة عليه لـ {instance.employee_id}",
-                        verb_de=f"Sie müssen eine neue Schichtanfrage \
-                            für {instance.employee_id} genehmigen",
-                        verb_es=f"Tiene una nueva solicitud de turno para \
-                            aprobar para {instance.employee_id}",
-                        verb_fr=f"Vous avez une nouvelle demande de quart de\
-                            travail à approuver pour {instance.employee_id}",
+                        verb_params={"employee": str(instance.employee_id)},
                         icon="information",
                         redirect=reverse("shift-request-view") + f"?id={instance.id}",
                     )
@@ -671,26 +665,22 @@ class ShiftAllocationFormView(HorillaFormView):
                 with contextlib.suppress(Exception):
                     notify.send(
                         form.instance.employee_id,
-                        recipient=(
-                            form.instance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
+                        recipient=form.instance.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
+                        verb=gettext_noop(
+                            "You have a new shift reallocation request to approve for %(employee)s."
                         ),
-                        verb=f"You have a new shift reallocation request to approve for {instance.employee_id}.",
-                        verb_ar=f"لديك طلب تخصيص جديد للورديات يتعين عليك الموافقة عليه لـ {instance.employee_id}.",
-                        verb_de=f"Sie haben eine neue Anfrage zur Verschiebung der Schichtzuteilung zur Genehmigung für {instance.employee_id}.",
-                        verb_es=f"Tienes una nueva solicitud de reasignación de turnos para aprobar para {instance.employee_id}.",
-                        verb_fr=f"Vous avez une nouvelle demande de réaffectation de shift à approuver pour {instance.employee_id}.",
+                        verb_params={"employee": str(instance.employee_id)},
                         icon="information",
                         redirect=reverse("shift-request-view") + f"?id={instance.id}",
                     )
 
                     notify.send(
                         instance.employee_id,
-                        recipient=(reallocate_emp.employee_user_id),
-                        verb=f"You have a new shift reallocation request from {instance.employee_id}.",
-                        verb_ar=f"لديك طلب تخصيص جديد للورديات من {instance.employee_id}.",
-                        verb_de=f"Sie haben eine neue Anfrage zur Verschiebung der Schichtzuteilung von {instance.employee_id}.",
-                        verb_es=f"Tienes una nueva solicitud de reasignación de turnos de {instance.employee_id}.",
-                        verb_fr=f"Vous avez une nouvelle demande de réaffectation de shift de {instance.employee_id}.",
+                        recipient=reallocate_emp.employee_user_id,
+                        verb=gettext_noop(
+                            "You have a new shift reallocation request from %(employee)s."
+                        ),
+                        verb_params={"employee": str(instance.employee_id)},
                         icon="information",
                         redirect=reverse("shift-request-view") + f"?id={instance.id}",
                     )

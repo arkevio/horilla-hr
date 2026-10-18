@@ -4,11 +4,12 @@ Modern dashboard views — KPI summary + ApexCharts.
 Accessible at /dashboard/modern/ alongside the existing dashboard.
 """
 
+import calendar
 import json
 from datetime import date, timedelta
 
 from django.contrib.auth.decorators import login_required
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import render
 from django.urls import reverse
@@ -16,10 +17,10 @@ from django.utils.translation import gettext_lazy as _
 from django.views.decorators.http import require_http_methods
 
 
-def _safe_url(url_name):
-    """Reverse a URL name; return '#' if the URL is not registered."""
+def _safe_url(url_name, query=""):
+    """Reverse a URL name with an optional query string; return '#' if the URL is not registered."""
     try:
-        return reverse(url_name)
+        return reverse(url_name) + query
     except Exception:
         return "#"
 
@@ -185,7 +186,7 @@ def _get_setup_checklist_context(request):
             "key": "shift",
             "title": _("Shift"),
             "description": _("Define working schedules — Morning, Evening, Night."),
-            "url": _safe_url("employee-shift-view"),
+            "url": _safe_url("employee-settings-view", "?tab=shift"),
             "done": (
                 _exists_for_company(EmployeeShift, company_pk) if company_pk else False
             ),
@@ -194,7 +195,7 @@ def _get_setup_checklist_context(request):
             "key": "shift_schedule",
             "title": _("Shift Schedule"),
             "description": _("Set day-wise timings for each shift."),
-            "url": _safe_url("employee-shift-schedule-view"),
+            "url": _safe_url("employee-settings-view", "?tab=shift-schedule"),
             "done": (
                 _exists_for_company(EmployeeShiftSchedule, company_pk)
                 if company_pk
@@ -205,7 +206,7 @@ def _get_setup_checklist_context(request):
             "key": "work_type",
             "title": _("Work Type"),
             "description": _("Set engagement types — Full Time, Part Time, Contract."),
-            "url": _safe_url("work-type-view"),
+            "url": _safe_url("employee-settings-view", "?tab=work-type"),
             "done": _exists_for_company(WorkType, company_pk) if company_pk else False,
         },
         {
@@ -274,6 +275,18 @@ def _parse_period(request):
     return from_date, to_date
 
 
+def _current_month_bounds():
+    """Return (first_day, last_day) of the current calendar month.
+
+    Always derived from ``date.today()`` -- never cached -- so every chart
+    that calls this rolls over to the new month on its own, with no stored
+    "current period" to go stale.
+    """
+    today = date.today()
+    _, last_day_num = calendar.monthrange(today.year, today.month)
+    return today.replace(day=1), today.replace(day=last_day_num)
+
+
 def _is_manager(user):
     """Return True if user is a reporting manager for at least one active employee."""
     try:
@@ -303,10 +316,10 @@ def _leave_request_list_qs(request):
     ).distinct()
 
 
-def _today_on_leave_qs(request, today):
+def _today_leave_qs(request, today, status="approved"):
     return (
         _leave_request_list_qs(request)
-        .filter(status="approved", start_date__lte=today)
+        .filter(status=status, start_date__lte=today)
         .filter(Q(end_date__gte=today) | Q(end_date__isnull=True, start_date=today))
     )
 
@@ -462,10 +475,8 @@ def dashboard_kpi_data(request):
     """Return KPI summary data as JSON."""
     from employee.models import Employee
 
-    from_date, to_date = _parse_period(request)
-    today = to_date
+    # KPI tiles are live "today" figures; the dashboard's date filter never applies.
     real_today = date.today()
-    first_of_month = from_date
     scoped_ids = _scoped_active_employee_ids(request)
 
     emp_qs = Employee.objects.filter(is_active=True)
@@ -473,47 +484,98 @@ def dashboard_kpi_data(request):
         emp_qs = emp_qs.filter(id__in=scoped_ids)
     total_employees = emp_qs.count()
 
+    # The tile reads "+N This Month", so this is always the current calendar
+    # month (not the picker's range) and only counts active employees.
     new_joiners = 0
     try:
         from employee.models import EmployeeWorkInformation
 
-        join_qs = EmployeeWorkInformation.objects.filter(
-            date_joining__gte=first_of_month,
-            date_joining__lte=today,
-        )
-        if scoped_ids is not None:
-            join_qs = join_qs.filter(employee_id__in=scoped_ids)
-        new_joiners = join_qs.count()
+        new_joiners = EmployeeWorkInformation.objects.filter(
+            date_joining__gte=real_today.replace(day=1),
+            date_joining__lte=real_today,
+            employee_id__in=emp_qs,
+        ).count()
     except Exception:
         pass
 
-    on_leave = 0
-    leave_employee_ids = []
+    # Distinct employees, not leave requests — an employee with two
+    # overlapping approved leave records must still count once.
+    on_leave_employee_ids = set()
+    full_day_leave_ids = set()
+    half_day_today = 0
     try:
-        leave_qs = _today_on_leave_qs(request, real_today)
-        leave_employee_ids = list(
+        leave_qs = _today_leave_qs(request, real_today, status="approved")
+        on_leave_employee_ids = set(
             leave_qs.values_list("employee_id", flat=True).distinct()
         )
-        # Count requests, not distinct people — request-view lists one row per request.
-        on_leave = leave_qs.count()
+        # Half day only counts when today itself is the broken-down boundary
+        # date — a multi-day leave's middle days are always full days
+        # regardless of how its start/end boundaries are split.
+        half_day_q = Q(
+            start_date=real_today,
+            start_date_breakdown__in=["first_half", "second_half"],
+        ) | Q(
+            end_date=real_today,
+            end_date_breakdown__in=["first_half", "second_half"],
+        )
+        half_day_today = (
+            leave_qs.filter(half_day_q).values("employee_id").distinct().count()
+        )
+        full_day_leave_ids = set(
+            leave_qs.exclude(half_day_q)
+            .values_list("employee_id", flat=True)
+            .distinct()
+        )
     except Exception:
         pass
+    on_leave = len(on_leave_employee_ids)
 
     present_today = 0
+    present_ids = set()
     try:
         from attendance.models import Attendance
 
         present_qs = Attendance.objects.filter(
             attendance_date=real_today, employee_id__in=emp_qs
         )
-        present_today = present_qs.count()
+        # Someone on a full-day approved leave counts as on leave, not as
+        # checked in. A half-day leave with an attendance record still counts
+        # as checked in (and as on leave).
+        present_ids = (
+            set(present_qs.values_list("employee_id", flat=True)) - full_day_leave_ids
+        )
+        present_today = len(present_ids)
     except Exception:
         pass
 
     # Expected = active employees not on approved leave (excludes leave from
     # the denominator so "absent" is not inflated by people who should be out).
-    expected_today = max(0, total_employees - len(set(leave_employee_ids)))
-    not_checked_in = max(0, expected_today - present_today)
+    expected_today = max(0, total_employees - on_leave)
+    # Counted as a set difference, not total - present - on_leave: someone on
+    # a half-day leave who also clocked in is in both of those sets, and
+    # subtracting both would count them out twice. This is the same
+    # definition as the employee list's "expected_to_check_in" filter
+    # (attendance/filters.py), which the card drills into, so the tile and
+    # the list always agree. The Attendance dashboard's own Offline card is
+    # a different, shift-aware metric.
+    not_checked_in = (
+        emp_qs.exclude(id__in=present_ids).exclude(id__in=on_leave_employee_ids).count()
+    )
+    # On a weekly off or holiday nobody is expected in, so whoever hasn't
+    # checked in is on week off rather than absent.
+    week_off_today = False
+    try:
+        from base.methods import get_holiday_dates, is_company_leave
+
+        week_off_today = bool(is_company_leave(real_today)) or real_today in set(
+            get_holiday_dates(real_today, real_today)
+        )
+    except Exception:
+        pass
+    week_off_count = not_checked_in if week_off_today else 0
+    if week_off_today:
+        not_checked_in = 0
+    expected_to_check_in = not_checked_in
     # Keep absent_today as an alias for not_checked_in for API compatibility.
     absent_today = not_checked_in
     attendance_rate = (
@@ -522,25 +584,9 @@ def dashboard_kpi_data(request):
 
     pending_leaves = 0
     try:
-        pending_leaves = (
-            _leave_request_list_qs(request).filter(status="requested").count()
-        )
-    except Exception:
-        pass
-
-    open_recruitments = 0
-    try:
-        from recruitment.models import Recruitment
-
-        # Recruitments stay org-wide for users with recruitment view; managers
-        # without that perm see 0 (chart is also gated).
-        if (
-            request.user.has_perm("recruitment.view_recruitment")
-            or request.user.is_superuser
-        ):
-            open_recruitments = Recruitment.objects.filter(
-                is_active=True, closed=False
-            ).count()
+        pending_leaves = _today_leave_qs(
+            request, real_today, status="requested"
+        ).count()
     except Exception:
         pass
 
@@ -551,12 +597,15 @@ def dashboard_kpi_data(request):
             "absent_today": absent_today,
             "expected_today": expected_today,
             "not_checked_in": not_checked_in,
+            "expected_to_check_in": expected_to_check_in,
             "attendance_rate": attendance_rate,
             "on_leave": on_leave,
+            "half_day_today": half_day_today,
+            "week_off_today": week_off_today,
+            "week_off_count": week_off_count,
             "pending_leaves": pending_leaves,
             "new_joiners": new_joiners,
-            "open_recruitments": open_recruitments,
-            "date": today.isoformat(),
+            "date": real_today.isoformat(),
             "is_team_scoped": scoped_ids is not None,
         }
     )
@@ -564,7 +613,7 @@ def dashboard_kpi_data(request):
 
 @login_required
 def dashboard_attendance_trend(request):
-    """Weekly attendance trend.
+    """Weekly-bucketed attendance trend for the current calendar month.
 
     Requires attendance view permission, superuser, or reporting-manager status
     (managers without org-wide employee view see team-scoped rates).
@@ -581,12 +630,9 @@ def dashboard_attendance_trend(request):
     weeks = []
     scoped_ids = _scoped_active_employee_ids(request)
 
-    has_period = bool(request.GET.get("from_date") and request.GET.get("to_date"))
-    if has_period:
-        from_date, to_date = _parse_period(request)
-    else:
-        to_date = today
-        from_date = today - timedelta(weeks=11) - timedelta(days=today.weekday())
+    # Always the current calendar month -- ignores any from_date/to_date so
+    # the trend can't be pinned to a stale period by the shared date picker.
+    from_date, to_date = _current_month_bounds()
 
     try:
         from attendance.models import Attendance
@@ -623,7 +669,7 @@ def dashboard_attendance_trend(request):
 
 @login_required
 def dashboard_leave_breakdown(request):
-    """Leave type breakdown for the selected period.
+    """Leave type breakdown (approved vs pending) for the dashboard date range.
 
     Requires leave.view_leaverequest permission or superuser.
     """
@@ -631,61 +677,96 @@ def dashboard_leave_breakdown(request):
     if not (user.is_superuser or user.has_perm("leave.view_leaverequest")):
         return JsonResponse({"no_permission": True})
 
-    from_date, to_date = _parse_period(request)
-    today = to_date
-    first_of_month = from_date
+    first_of_month, last_of_month = _parse_period(request)
+    today = date.today()
     breakdown = []
 
     try:
         from django.db.models import Count, Sum
 
-        from leave.models import LeaveRequest
+        from leave.models import LeaveType
 
-        data = (
-            LeaveRequest.objects.filter(
-                start_date__gte=first_of_month,
+        # Any request that overlaps the month counts, not only those that
+        # start in it -- a leave begun on the 28th still belongs to this month.
+        # Same rows the Leave Requests page lists, so a click-through matches.
+        rows = (
+            _leave_request_list_qs(request)
+            .filter(
                 status__in=["approved", "requested"],
+                start_date__lte=last_of_month,
             )
-            .values("leave_type_id__name")
+            .filter(
+                Q(end_date__gte=first_of_month)
+                | Q(end_date__isnull=True, start_date__gte=first_of_month)
+            )
+            .order_by()  # LeaveRequest's default ordering would split the GROUP BY per row
+            .values("leave_type_id", "status")
             .annotate(count=Count("id"), total_days=Sum("requested_days"))
-            .order_by("-count")[:8]
         )
+        by_type = {}
+        for row in rows:
+            entry = by_type.setdefault(
+                row["leave_type_id"], {"approved": 0, "requested": 0, "days": 0.0}
+            )
+            entry[row["status"]] += row["count"]
+            entry["days"] += float(row["total_days"] or 0)
 
-        for item in data:
+        for lt in LeaveType.objects.all().order_by("name"):
+            entry = by_type.get(lt.pk, {"approved": 0, "requested": 0, "days": 0.0})
             breakdown.append(
                 {
-                    "type": item["leave_type_id__name"] or _("Unknown"),
-                    "count": item["count"],
-                    "days": float(item["total_days"] or 0),
+                    "id": lt.pk,
+                    "type": lt.name,
+                    "approved": entry["approved"],
+                    "requested": entry["requested"],
+                    "count": entry["approved"] + entry["requested"],
+                    "days": entry["days"],
                 }
             )
+        breakdown.sort(key=lambda b: (-b["count"], b["type"]))
     except Exception:
         pass
 
-    return JsonResponse({"breakdown": breakdown, "month": today.strftime("%B %Y")})
+    return JsonResponse(
+        {
+            "breakdown": breakdown,
+            "month": today.strftime("%B %Y"),
+            "from_date": first_of_month.isoformat(),
+            "to_date": last_of_month.isoformat(),
+        }
+    )
 
 
 @login_required
 def dashboard_department_headcount(request):
-    """Department-wise headcount."""
+    """Department-wise headcount for every department, largest first."""
     departments = []
 
     try:
         from django.db.models import Count
 
+        from base.models import Department
         from employee.models import Employee
 
         data = (
             Employee.objects.filter(is_active=True)
             .values("employee_work_info__department_id__department")
             .annotate(count=Count("id"))
-            .order_by("-count")[:10]
+            .order_by("-count")
         )
 
+        seen = set()
         for item in data:
             dept = item["employee_work_info__department_id__department"]
             if dept:
                 departments.append({"department": dept, "count": item["count"]})
+                seen.add(dept)
+        for name in (
+            Department.objects.exclude(department__in=seen)
+            .order_by("department")
+            .values_list("department", flat=True)
+        ):
+            departments.append({"department": name, "count": 0})
     except Exception:
         pass
 
@@ -694,43 +775,102 @@ def dashboard_department_headcount(request):
 
 @login_required
 def dashboard_gender_split(request):
-    """Gender distribution."""
+    """Gender distribution -- overall (default), or ?view=department for a
+    per-department breakdown.
+    """
+    view = (
+        request.GET.get("view")
+        if request.GET.get("view") in ("overall", "department")
+        else "overall"
+    )
+    gender_map = {
+        "male": _("Male"),
+        "female": _("Female"),
+        "other": _("Other"),
+        "": _("Not Specified"),
+    }
     genders = []
+    departments = []
 
     try:
         from django.db.models import Count
 
         from employee.models import Employee
 
-        data = (
-            Employee.objects.filter(is_active=True)
-            .values("gender")
-            .annotate(count=Count("id"))
-            .order_by("-count")
-        )
-
-        gender_map = {
-            "male": _("Male"),
-            "female": _("Female"),
-            "other": _("Other"),
-            "": _("Not Specified"),
-        }
-        for item in data:
-            genders.append(
-                {
-                    "gender": gender_map.get(
-                        item["gender"], item["gender"] or _("Not Specified")
-                    ),
-                    # The name above is translated, so it cannot be used to look
-                    # up a colour or build a filter. Ship the raw field value too.
-                    "key": item["gender"] or "",
-                    "count": item["count"],
-                }
+        if view == "department":
+            # .order_by() clears the default ordering Django would otherwise
+            # inherit here -- combined with the company-scoping manager's own
+            # .distinct() (see HorillaCompanyManager.get_queryset), an
+            # implicit ordering field gets dragged into the GROUP BY,
+            # splitting every matching employee into their own one-row
+            # "group" (count always 1) instead of aggregating by
+            # department+gender.
+            rows = (
+                Employee.objects.filter(is_active=True)
+                .values(
+                    "employee_work_info__department_id",
+                    "employee_work_info__department_id__department",
+                    "gender",
+                )
+                .annotate(count=Count("id"))
+                .order_by()
             )
+            # Stable series order regardless of which genders happen to
+            # appear first in the data, so a bar's segment colors/order
+            # don't shuffle between departments.
+            gender_order = ["male", "female", "other", ""]
+            seen_keys = set()
+            by_dept = {}
+            for row in rows:
+                dept_id = row["employee_work_info__department_id"]
+                dept_name = row["employee_work_info__department_id__department"] or _(
+                    "No department"
+                )
+                gkey = row["gender"] or ""
+                seen_keys.add(gkey)
+                entry = by_dept.setdefault(
+                    dept_id, {"department": dept_name, "id": dept_id, "by_gender": {}}
+                )
+                entry["by_gender"][gkey] = row["count"]
+
+            ordered_keys = [k for k in gender_order if k in seen_keys] + sorted(
+                seen_keys - set(gender_order)
+            )
+            genders = [
+                {"gender": gender_map.get(k, k or _("Not Specified")), "key": k}
+                for k in ordered_keys
+            ]
+            departments = sorted(
+                by_dept.values(),
+                key=lambda d: -sum(d["by_gender"].values()),
+            )
+        else:
+            # .order_by("-count") already clears the default ordering here
+            # (same fix as above) -- without it this would hit the same
+            # one-row-per-employee GROUP BY bug.
+            data = (
+                Employee.objects.filter(is_active=True)
+                .values("gender")
+                .annotate(count=Count("id"))
+                .order_by("-count")
+            )
+            for item in data:
+                genders.append(
+                    {
+                        "gender": gender_map.get(
+                            item["gender"], item["gender"] or _("Not Specified")
+                        ),
+                        # The name above is translated, so it cannot be used
+                        # to look up a colour or build a filter. Ship the raw
+                        # field value too.
+                        "key": item["gender"] or "",
+                        "count": item["count"],
+                    }
+                )
     except Exception:
         pass
 
-    return JsonResponse({"genders": genders})
+    return JsonResponse({"view": view, "genders": genders, "departments": departments})
 
 
 @login_required
@@ -844,6 +984,7 @@ def dashboard_todays_leave(request):
             start_date__lte=today,
             end_date__gte=today,
             status="approved",
+            employee_id__is_active=True,
         ).select_related("employee_id", "leave_type_id")
 
         if not can_view_all:
@@ -881,9 +1022,15 @@ def dashboard_todays_leave(request):
 
 @login_required
 def dashboard_upcoming_holidays(request):
-    """Upcoming holidays in the next 7 days for the current company."""
+    """Holidays occurring within the current calendar month.
+
+    ``Holidays.objects`` is a ``HorillaCompanyManager``, so the active
+    company (or "All Companies") is already applied automatically -- same
+    as every other query on this dashboard -- with no manual session lookup
+    needed here.
+    """
     today = date.today()
-    next_week = today + timedelta(days=7)
+    first_of_month, last_of_month = _current_month_bounds()
     holidays_data = []
 
     try:
@@ -891,14 +1038,14 @@ def dashboard_upcoming_holidays(request):
 
         from base.models import Holidays
 
-        company_id = request.session.get("selected_company")
         qs = Holidays.objects.filter(
-            Q(start_date__gte=today, start_date__lte=next_week)
-            | Q(start_date__lte=today, end_date__gte=today),
+            Q(start_date__lte=last_of_month)
+            & (
+                Q(end_date__gte=first_of_month)
+                | Q(end_date__isnull=True, start_date__gte=first_of_month)
+            ),
             is_specific=False,
         )
-        if company_id:
-            qs = qs.filter(company_id=company_id)
 
         for h in qs.order_by("start_date")[:10]:
             holidays_data.append(
@@ -918,63 +1065,66 @@ def dashboard_upcoming_holidays(request):
 
 @login_required
 def dashboard_birthdays_anniversaries(request):
-    """Upcoming birthdays and work anniversaries in the next 7 days."""
+    """Birthdays and work anniversaries occurring in the current calendar month."""
     today = date.today()
-    end = today + timedelta(days=7)
     birthdays = []
     anniversaries = []
+
+    def _this_month_date(month_day_source):
+        """Recreate a month/day in the current year, dodging Feb 29 on non-leap years."""
+        try:
+            return month_day_source.replace(year=today.year)
+        except ValueError:
+            return date(today.year, month_day_source.month, 28)
 
     try:
         from employee.models import Employee, EmployeeWorkInformation
 
-        # Birthdays — compare month/day to handle year-wrap
-        for emp in Employee.objects.filter(is_active=True).exclude(dob__isnull=True):
-            dob = emp.dob
-            this_year_bday = dob.replace(year=today.year)
-            if this_year_bday < today:
-                this_year_bday = dob.replace(year=today.year + 1)
-            if today <= this_year_bday <= end:
-                birthdays.append(
-                    {
-                        "id": emp.id,
-                        "name": emp.get_full_name(),
-                        "avatar": emp.get_avatar(),
-                        "date": this_year_bday.strftime("%b %d"),
-                        "days_away": (this_year_bday - today).days,
-                    }
-                )
+        # Birthdays — compare month only, so already-celebrated days this
+        # month still show alongside ones still to come.
+        for emp in Employee.objects.filter(
+            is_active=True, dob__month=today.month
+        ).exclude(dob__isnull=True):
+            this_year_bday = _this_month_date(emp.dob)
+            birthdays.append(
+                {
+                    "id": emp.id,
+                    "name": emp.get_full_name(),
+                    "avatar": emp.get_avatar(),
+                    "date": this_year_bday.strftime("%b %d"),
+                    "days_away": (this_year_bday - today).days,
+                }
+            )
 
-        birthdays.sort(key=lambda x: x["days_away"])
+        # Closest to today first (whether already past or still upcoming this
+        # month), so the 10-item cap below keeps the most relevant entries.
+        birthdays.sort(key=lambda x: abs(x["days_away"]))
 
-        # Work anniversaries
+        # Work anniversaries — same current-month rule as birthdays.
         for wi in (
             EmployeeWorkInformation.objects.filter(
                 employee_id__is_active=True,
+                date_joining__month=today.month,
             )
             .exclude(date_joining__isnull=True)
             .select_related("employee_id")
         ):
             join = wi.date_joining
-            this_year_ann = join.replace(year=today.year)
-            if this_year_ann < today:
-                this_year_ann = join.replace(year=today.year + 1)
-            if today <= this_year_ann <= end:
-                years = today.year - join.year
-                if this_year_ann.year > today.year:
-                    years += 1
-                emp = wi.employee_id
-                anniversaries.append(
-                    {
-                        "id": emp.id,
-                        "name": emp.get_full_name(),
-                        "avatar": emp.get_avatar(),
-                        "date": this_year_ann.strftime("%b %d"),
-                        "years": years,
-                        "days_away": (this_year_ann - today).days,
-                    }
-                )
+            this_year_ann = _this_month_date(join)
+            years = today.year - join.year
+            emp = wi.employee_id
+            anniversaries.append(
+                {
+                    "id": emp.id,
+                    "name": emp.get_full_name(),
+                    "avatar": emp.get_avatar(),
+                    "date": this_year_ann.strftime("%b %d"),
+                    "years": years,
+                    "days_away": (this_year_ann - today).days,
+                }
+            )
 
-        anniversaries.sort(key=lambda x: x["days_away"])
+        anniversaries.sort(key=lambda x: abs(x["days_away"]))
     except Exception:
         pass
 
@@ -1113,6 +1263,7 @@ def dashboard_payroll_summary(request):
         current_qs = Payslip.objects.filter(
             start_date__gte=first_of_month,
             start_date__lte=today,
+            employee_id__is_active=True,
             status__in=["confirmed", "paid", "review_ongoing"],
         )
         current = _aggregate(current_qs)
@@ -1120,6 +1271,7 @@ def dashboard_payroll_summary(request):
         prev_qs = Payslip.objects.filter(
             start_date__gte=prev_month_start,
             start_date__lte=prev_month_end,
+            employee_id__is_active=True,
             status__in=["confirmed", "paid"],
         )
         previous = _aggregate(prev_qs)
@@ -1226,7 +1378,10 @@ def dashboard_pending_approvals(request):
         from base.methods import filtersubordinates
 
         if can_approve:
-            qs = AssetRequest.objects.filter(asset_request_status="Requested")
+            qs = AssetRequest.objects.filter(
+                asset_request_status="Requested",
+                requested_employee_id__is_active=True,
+            )
             asset_count = (
                 (
                     filtersubordinates(
@@ -1331,7 +1486,11 @@ def dashboard_pending_approvals(request):
             # Match ReimbursementsListView's own scoping
             # (payroll.view_reimbursement) so this count agrees with the
             # destination list.
-            qs = Reimbursement.objects.filter(status="requested", type="reimbursement")
+            qs = Reimbursement.objects.filter(
+                status="requested",
+                type="reimbursement",
+                employee_id__is_active=True,
+            )
             reimb_count = filter_own_records(
                 request, qs, "payroll.view_reimbursement"
             ).count()
@@ -1391,6 +1550,9 @@ def dashboard_turnover(request):
 
     Org-wide metric: requires employee view permission (not manager-only).
     Exit counts prefer shared report exit helper when available.
+
+    ``?group=department`` additionally returns ``departments``: per-department
+    hires/exits for the same six months (index-aligned with ``months``).
     """
     user = request.user
     if not (user.has_perm("employee.view_employee") or user.is_superuser):
@@ -1399,7 +1561,18 @@ def dashboard_turnover(request):
     _from_date, to_date = _parse_period(request)
     today = to_date
     months = []
+    by_dept = request.GET.get("group") == "department"
+    # {(id, name): {"hires": [0] * 6, "exits": [0] * 6}}
+    dept_rows = {}
+
+    def _dept_row(dept_id, name):
+        return dept_rows.setdefault(
+            (dept_id, name), {"hires": [0] * 6, "exits": [0] * 6}
+        )
+
     report_url = ""
+    total_employees = 0
+    total_exits_6m = 0
     try:
         report_url = reverse("standard-report-detail", args=["turnover-attrition"])
     except Exception:
@@ -1408,11 +1581,11 @@ def dashboard_turnover(request):
     try:
         from employee.models import Employee, EmployeeWorkInformation
         from report.engine import ReportFilters
-        from report.metrics._exits import exits_in_period
+        from report.metrics._exits import iter_exits
 
         filters = ReportFilters(from_date=today.replace(day=1), to_date=today)
 
-        for i in range(5, -1, -1):
+        for idx, i in enumerate(range(5, -1, -1)):
             year = today.year
             month = today.month - i
             while month <= 0:
@@ -1428,15 +1601,33 @@ def dashboard_turnover(request):
                     month=month_start.month + 1
                 ) - timedelta(days=1)
 
-            hires = EmployeeWorkInformation.objects.filter(
+            hires_qs = EmployeeWorkInformation.objects.filter(
                 date_joining__gte=month_start,
                 date_joining__lte=month_end,
-            ).count()
-            exits = exits_in_period(filters, from_date=month_start, to_date=month_end)
+            )
+            hires = hires_qs.count()
+            exit_rows = iter_exits(filters, from_date=month_start, to_date=month_end)
+            exits = len(exit_rows)
+
+            if by_dept:
+                for r in hires_qs.values(
+                    "department_id", "department_id__department"
+                ).annotate(n=Count("id")):
+                    _dept_row(r["department_id"], r["department_id__department"])[
+                        "hires"
+                    ][idx] = r["n"]
+                for row in exit_rows:
+                    wi = getattr(row.get("employee"), "employee_work_info", None)
+                    dept = getattr(wi, "department_id", None)
+                    _dept_row(
+                        getattr(dept, "id", None), getattr(dept, "department", None)
+                    )["exits"][idx] += 1
 
             months.append(
                 {
                     "month": month_start.strftime("%b %Y"),
+                    "from": month_start.isoformat(),
+                    "to": month_end.isoformat(),
                     "hires": hires,
                     "exits": exits,
                     "net": hires - exits,
@@ -1455,24 +1646,44 @@ def dashboard_turnover(request):
             {"month": f"M{i+1}", "hires": 0, "exits": 0, "net": 0} for i in range(6)
         ]
         turnover_rate = 0
+        total_exits_6m = 0
+        total_employees = 0
 
-    return JsonResponse(
-        {
-            "months": months,
-            "turnover_rate_6m": turnover_rate,
-            "report_url": report_url,
-            "subtitle": str(_("All exits — see Standard Report for detail")),
-        }
-    )
+    payload = {
+        "months": months,
+        "turnover_rate_6m": turnover_rate,
+        "turnover_exits_6m": total_exits_6m,
+        "turnover_headcount": total_employees,
+        "turnover_formula": str(_("Exits in last 6 months ÷ Active employees × 100")),
+        "report_url": report_url,
+        "subtitle": str(_("All exits — see Standard Report for detail")),
+    }
+    if by_dept:
+        # Busiest departments first; people without a department are
+        # grouped under one label rather than dropped.
+        payload["departments"] = sorted(
+            (
+                {
+                    "id": dept_id,
+                    "name": name or str(_("No Department")),
+                    "hires": row["hires"],
+                    "exits": row["exits"],
+                }
+                for (dept_id, name), row in dept_rows.items()
+            ),
+            key=lambda d: -(sum(d["hires"]) + sum(d["exits"])),
+        )
+    return JsonResponse(payload)
 
 
 @login_required
 def dashboard_leave_coverage(request):
-    """Next-7-day leave coverage: headcount on approved leave per day + today by dept.
+    """Current-month leave coverage: headcount on approved leave per day + by dept.
 
     Managers without org-wide employee view see team-scoped counts.
     """
     today = date.today()
+    first_of_month, last_of_month = _current_month_bounds()
     scoped_ids = _scoped_active_employee_ids(request)
     days = []
     by_department = []
@@ -1490,11 +1701,13 @@ def dashboard_leave_coverage(request):
         active_total = emp_qs.count()
         active_ids = set(emp_qs.values_list("id", flat=True))
 
-        for offset in range(7):
-            day = today + timedelta(days=offset)
+        days_in_month = (last_of_month - first_of_month).days + 1
+        for offset in range(days_in_month):
+            day = first_of_month + timedelta(days=offset)
             leave_qs = LeaveRequest.objects.filter(
                 start_date__lte=day,
                 status="approved",
+                employee_id__is_active=True,
             ).filter(Q(end_date__gte=day) | Q(end_date__isnull=True, start_date=day))
             if scoped_ids is not None:
                 leave_qs = leave_qs.filter(employee_id__in=scoped_ids)
@@ -1511,26 +1724,31 @@ def dashboard_leave_coverage(request):
                     "on_leave": on_leave,
                     "available": max(0, active_total - on_leave),
                     "coverage_pct": coverage_pct,
-                    "is_today": offset == 0,
+                    "is_today": day == today,
                 }
             )
 
-        # Today: on-leave headcount by department (top 8)
-        today_leave_ids = set(
+        # Current month: on-leave headcount by department (top 8) -- any
+        # employee with an approved leave overlapping the month at all.
+        month_leave_ids = set(
             LeaveRequest.objects.filter(
-                start_date__lte=today,
+                start_date__lte=last_of_month,
                 status="approved",
+                employee_id__is_active=True,
             )
-            .filter(Q(end_date__gte=today) | Q(end_date__isnull=True, start_date=today))
+            .filter(
+                Q(end_date__gte=first_of_month)
+                | Q(end_date__isnull=True, start_date__gte=first_of_month)
+            )
             .values_list("employee_id", flat=True)
             .distinct()
         )
         if scoped_ids is not None:
-            today_leave_ids &= active_ids
+            month_leave_ids &= active_ids
 
-        if today_leave_ids:
+        if month_leave_ids:
             dept_rows = (
-                Employee.objects.filter(id__in=today_leave_ids)
+                Employee.objects.filter(id__in=month_leave_ids)
                 .values("employee_work_info__department_id__department")
                 .annotate(count=Count("id"))
                 .order_by("-count")[:8]
@@ -1568,6 +1786,24 @@ def _call_module_json(view_callable, request):
         return JsonResponse({"error": str(exc), "no_permission": True}, status=500)
 
 
+def _force_get_params(request, **params):
+    """Shallow-copy ``request`` with the given GET params forced in.
+
+    These module chart views (attendance/leave) are shared with their own
+    module dashboards, which rely on the view's own default period. Forcing
+    params on a copy lets the main dashboard pin them to the current month
+    without changing the view's default for those other callers.
+    """
+    import copy
+
+    forced = copy.copy(request)
+    get = request.GET.copy()
+    for key, value in params.items():
+        get[key] = value
+    forced.GET = get
+    return forced
+
+
 @login_required
 def dashboard_employee_status(request):
     from employee.views import dashboard_employee
@@ -1575,46 +1811,204 @@ def dashboard_employee_status(request):
     return _call_module_json(dashboard_employee, request)
 
 
+_OPEN_TICKET_STATUSES = ["new", "in_progress", "on_hold"]
+
+
+def _open_tickets_in_range(request):
+    """Open (not resolved/canceled) active tickets created in the dashboard range."""
+    from helpdesk.models import Ticket
+
+    from_date, to_date = _parse_period(request)
+    return (
+        from_date,
+        to_date,
+        Ticket.objects.filter(
+            is_active=True,
+            status__in=_OPEN_TICKET_STATUSES,
+            created_date__gte=from_date,
+            created_date__lte=to_date,
+        ),
+    )
+
+
+@login_required
+def dashboard_ticket_priority(request):
+    """Open tickets by priority (high first), split by status, with overdue counts."""
+    user = request.user
+    if not (user.is_superuser or user.has_perm("helpdesk.view_ticket")):
+        return JsonResponse({"no_permission": True})
+
+    from helpdesk.models import PRIORITY, TICKET_STATUS
+
+    today = date.today()
+    status_labels = [
+        (k, str(v)) for k, v in TICKET_STATUS if k in _OPEN_TICKET_STATUSES
+    ]
+    priorities = []
+    from_date, to_date = _parse_period(request)
+    try:
+        from_date, to_date, qs = _open_tickets_in_range(request)
+        counts = {}
+        for row in qs.order_by().values("priority", "status").annotate(n=Count("id")):
+            counts[(row["priority"], row["status"])] = row["n"]
+        overdue = {
+            row["priority"]: row["n"]
+            for row in qs.filter(deadline__lt=today)
+            .order_by()
+            .values("priority")
+            .annotate(n=Count("id"))
+        }
+        for key, label in reversed(list(PRIORITY)):  # high, medium, low
+            by_status = {s: counts.get((key, s), 0) for s, _l in status_labels}
+            priorities.append(
+                {
+                    "priority": key,
+                    "label": str(label),
+                    "by_status": by_status,
+                    "total": sum(by_status.values()),
+                    "overdue": overdue.get(key, 0),
+                }
+            )
+    except Exception:
+        priorities = []
+
+    return JsonResponse(
+        {
+            "priorities": priorities,
+            "statuses": [{"key": k, "label": label} for k, label in status_labels],
+            "total": sum(p["total"] for p in priorities),
+            "from_date": from_date.isoformat(),
+            "to_date": to_date.isoformat(),
+        }
+    )
+
+
+@login_required
+def dashboard_overdue_tickets(request):
+    """Open tickets past their deadline, most overdue first (top 10 plus the full count)."""
+    user = request.user
+    if not (user.is_superuser or user.has_perm("helpdesk.view_ticket")):
+        return JsonResponse({"no_permission": True})
+
+    today = date.today()
+    tickets = []
+    count = 0
+    from_date, to_date = _parse_period(request)
+    try:
+        from_date, to_date, qs = _open_tickets_in_range(request)
+        qs = qs.filter(deadline__lt=today)
+        count = qs.count()
+        for t in (
+            qs.select_related("employee_id", "ticket_type")
+            .prefetch_related("assigned_to")
+            .order_by("deadline", "id")[:10]
+        ):
+            emp = t.employee_id
+            assignee = next(iter(t.assigned_to.all()), None)
+            tickets.append(
+                {
+                    "id": t.id,
+                    "ticket_id": (
+                        f"{t.ticket_type.prefix}-{t.pk:03d}"
+                        if t.ticket_type
+                        else str(t.pk)
+                    ),
+                    "title": t.title,
+                    "owner": emp.get_full_name() if emp else "—",
+                    "avatar": emp.get_avatar() if emp else None,
+                    "assignee": assignee.get_full_name() if assignee else "",
+                    "priority": t.priority,
+                    "priority_label": t.get_priority_display(),
+                    "status_label": t.get_status_display(),
+                    "deadline": t.deadline.strftime("%b %d, %Y"),
+                    "days_overdue": (today - t.deadline).days,
+                }
+            )
+    except Exception:
+        tickets = []
+
+    return JsonResponse(
+        {
+            "tickets": tickets,
+            "count": count,
+            "from_date": from_date.isoformat(),
+            "to_date": to_date.isoformat(),
+        }
+    )
+
+
 @login_required
 def dashboard_attendance_overview(request):
     from attendance.views.dashboard import dashboard_attendance
 
-    return _call_module_json(dashboard_attendance, request)
+    # Daily overview: always today, never the dashboard's date filter.
+    today = date.today().isoformat()
+    scoped_request = _force_get_params(
+        request,
+        type="date_range",
+        date=today,
+        end_date=today,
+        unit="employees",
+    )
+    return _call_module_json(dashboard_attendance, scoped_request)
 
 
 @login_required
 def dashboard_department_overtime(request):
     from attendance.views.dashboard import department_overtime_chart
 
-    return _call_module_json(department_overtime_chart, request)
+    from_date, to_date = _parse_period(request)
+    scoped_request = _force_get_params(
+        request,
+        type="date_range",
+        date=from_date.isoformat(),
+        end_date=to_date.isoformat(),
+    )
+    return _call_module_json(department_overtime_chart, scoped_request)
 
 
 @login_required
 def dashboard_leave_trends(request):
     from leave.views import leave_over_period
 
-    return _call_module_json(leave_over_period, request)
+    from_date, to_date = _parse_period(request)
+    scoped_request = _force_get_params(
+        request, from_date=from_date.isoformat(), to_date=to_date.isoformat()
+    )
+    return _call_module_json(leave_over_period, scoped_request)
 
 
 @login_required
 def dashboard_leave_by_department(request):
     from leave.views import overall_leave
 
-    return _call_module_json(overall_leave, request)
+    from_date, to_date = _parse_period(request)
+    scoped_request = _force_get_params(
+        request,
+        from_date=from_date.isoformat(),
+        to_date=to_date.isoformat(),
+    )
+    return _call_module_json(overall_leave, scoped_request)
 
 
 @login_required
 def dashboard_department_leave_days(request):
     from leave.views import department_leave_chart
 
-    return _call_module_json(department_leave_chart, request)
+    from_date, to_date = _parse_period(request)
+    scoped_request = _force_get_params(
+        request, from_date=from_date.isoformat(), to_date=to_date.isoformat()
+    )
+    return _call_module_json(department_leave_chart, scoped_request)
 
 
 @login_required
 def dashboard_hiring_timeline(request):
     from recruitment.views.dashboard import dashboard_hiring
 
-    return _call_module_json(dashboard_hiring, request)
+    _, to_date = _parse_period(request)
+    scoped_request = _force_get_params(request, id=str(to_date.year))
+    return _call_module_json(dashboard_hiring, scoped_request)
 
 
 @login_required

@@ -1,7 +1,7 @@
 {% load i18n %}
 {% load basefilters %}
 {% is_manager_of request.user instance as can_manage %}
-{% if perms.leave.change_leaveallocationrequest or can_manage %}
+{% if perms.leave.change_compensatoryleaverequest or can_manage %}
     <div class="flex items-center justify-center gap-1" onclick="event.stopPropagation();">
         {% if instance.status == 'requested' %}
             <a type="submit"
@@ -13,7 +13,7 @@
                 <ion-icon name="checkmark-outline"></ion-icon>
             </a>
         {% else %}
-            <a type="submit" href="#" title="{% trans 'Approve' %}"
+            <a type="submit" title="{% trans 'Approve' %}" tabindex="-1" aria-disabled="true"
                 class="oh-btn oh-btn--success oh-btn--disabled oh-btn--sq-sm">
                 <ion-icon name="checkmark-outline"></ion-icon>
             </a>
@@ -28,7 +28,7 @@
                 <ion-icon name="close-circle-outline"></ion-icon>
             </a>
         {% else %}
-            <a type="submit" href="#" title="{% trans 'Reject' %}"
+            <a type="submit" title="{% trans 'Reject' %}" tabindex="-1" aria-disabled="true"
                 class="oh-btn oh-btn--danger oh-btn--disabled oh-btn--sq-sm">
                 <ion-icon name="close-circle-outline"></ion-icon>
             </a>

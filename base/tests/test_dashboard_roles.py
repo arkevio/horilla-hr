@@ -85,10 +85,10 @@ class ResolveHomeRoleTests(SimpleTestCase):
 
 
 class RoleDefaultPrefsTests(SimpleTestCase):
-    def test_manager_default_visible_at_most_six(self):
+    def test_manager_default_visible_at_most_eight(self):
         prefs = role_default_prefs("manager")
         visible = [p["id"] for p in prefs if p["visible"]]
-        self.assertLessEqual(len(visible), 6)
+        self.assertLessEqual(len(visible), 8)
         for demoted in DEMOTED_BY_DEFAULT:
             self.assertNotIn(demoted, visible)
         for expected in ROLE_DEFAULT_VISIBLE["manager"]:
@@ -99,7 +99,7 @@ class RoleDefaultPrefsTests(SimpleTestCase):
         visible = {p["id"] for p in prefs if p["visible"]}
         self.assertIn("employee_turnover", visible)
         self.assertNotIn("payroll_summary", visible)
-        self.assertNotIn("gender_distribution", visible)
+        self.assertIn("gender_distribution", visible)
 
 
 class PrefsMigrationTests(SimpleTestCase):
@@ -141,13 +141,12 @@ class ModernDashboardFetchInventoryTests(SimpleTestCase):
         )
         for token in banned:
             self.assertNotIn(token, text, msg=f"legacy fetch still present: {token}")
+        # The charts the simplified dashboard still draws (employee status,
+        # department overtime and the two leave-by-department charts went in
+        # "Simplify main dashboard KPI tiles").
         for required in (
-            "dashboard-employee-status",
             "dashboard-attendance-overview",
-            "dashboard-department-overtime",
             "dashboard-leave-trends",
-            "dashboard-leave-by-department",
-            "dashboard-department-leave-days",
             "dashboard-hiring-timeline",
             "dashboard-recruitment-by-stage",
         ):
@@ -158,9 +157,13 @@ class ModernDashboardFetchInventoryTests(SimpleTestCase):
 
         text = Path("templates/dashboard.html").read_text(encoding="utf-8")
         self.assertIn("status=approved&today_leave=true&filter_applied=on", text)
-        self.assertIn("attendance_date={% now 'Y-m-d' %}&filter_applied=on", text)
+        self.assertIn(
+            "expected_to_check_in={% now 'Y-m-d' %}&is_active=True&filter_applied=on",
+            text,
+        )
         self.assertIn("is_active=True&filter_applied=on", text)
-        self.assertIn("closed=false&filter_applied=on", text)
+        # Open Recruitments was deliberately dropped from the KPI row --
+        # dropped here to match, not restored in the template.
         self.assertIn("asset_request_status=Requested&filter_applied=1", text)
         self.assertIn(
             "view-reimbursement' %}?open_tab=1&status=requested&type=reimbursement&filter_applied=1",
@@ -179,6 +182,17 @@ class ModernDashboardFetchInventoryTests(SimpleTestCase):
         self.assertNotIn("approved=false&canceled=false", text)
         self.assertNotIn("is_validate_request=true", text)
         self.assertNotIn("dashboard-compliance-strip", text)
+        # Attendance Overview bars drill into the employee directory too,
+        # carrying department + date + how they attended. The statuses are
+        # indexed positionally because data.labels is gettext'd, so matching
+        # on its text would break under any non-English locale.
+        self.assertIn("['on_time', 'late_come', 'early_out']", text)
+        self.assertIn("attendance_status: status", text)
+        self.assertIn("employee_work_info__department_id: deptId", text)
+        # Both former attendance destinations are gone from the dashboard.
+        self.assertNotIn("late-come-early-out-view", text)
+        self.assertNotIn("url 'attendance-view'", text)
+
         # Home no longer surfaces report pin / suggested pack UI
         for removed in (
             "standard-report-suggested-pack",

@@ -7,15 +7,18 @@ from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 
 from base.methods import filter_own_records
+from horilla.methods import handle_no_permission
 from horilla_views.cbv_methods import login_required
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
     HorillaFormView,
     HorillaListView,
     HorillaNavView,
+    HorillaTabContentShell,
     HorillaTabView,
     TemplateView,
 )
+from payroll.decorators import is_leave_encashment_enabled, leave_encashment_visible_to
 from payroll.filters import ReimbursementFilter
 from payroll.forms.component_forms import ReimbursementForm
 from payroll.models.models import Reimbursement
@@ -42,17 +45,21 @@ class ReimbursementsAndEncashmentsTabView(HorillaTabView):
         self.tabs = [
             {
                 "title": _("Reimbursements"),
-                "url": f"{reverse('list-reimbursement')}",
-            },
-            {
-                "title": _("Leave Encashments"),
-                "url": f"{reverse('list-leave-encash')}",
+                "url": f"{reverse('reimbursement-tab-shell')}",
             },
             {
                 "title": _("Bonus Encashments"),
-                "url": f"{reverse('list-bonus-encash')}",
+                "url": f"{reverse('bonus-encash-tab-shell')}",
             },
         ]
+        if self.request and leave_encashment_visible_to(self.request):
+            self.tabs.insert(
+                1,
+                {
+                    "title": _("Leave Encashments"),
+                    "url": f"{reverse('leave-encash-tab-shell')}",
+                },
+            )
 
     def get_context_data(self, **kwargs):
         from payroll.filters import ReimbursementFilter
@@ -78,9 +85,9 @@ class ReimbursementsAndEncashmentsTabView(HorillaTabView):
             "payroll.view_reimbursement",
         ).count()
 
-        reimb_url = reverse("list-reimbursement")
-        leave_url = reverse("list-leave-encash")
-        bonus_url = reverse("list-bonus-encash")
+        reimb_url = reverse("reimbursement-tab-shell")
+        leave_url = reverse("leave-encash-tab-shell")
+        bonus_url = reverse("bonus-encash-tab-shell")
 
         for tab in self.tabs:
             url = tab.get("url", "")
@@ -122,6 +129,8 @@ class ReimbursementsAndEncashmentsListView(HorillaListView):
             """
             onclick="
             $('#applyFilter').closest('form').find('[name=status]').val('rejected');
+            $('[name=approved]').val('unknown').change();
+            $('[name=requested]').val('unknown').change();
             $('#applyFilter').click();
             "
             """,
@@ -132,6 +141,8 @@ class ReimbursementsAndEncashmentsListView(HorillaListView):
             """
             onclick="
             $('#applyFilter').closest('form').find('[name=status]').val('approved');
+            $('[name=rejected]').val('unknown').change();
+            $('[name=requested]').val('unknown').change();
             $('#applyFilter').click();
             "
             """,
@@ -142,6 +153,8 @@ class ReimbursementsAndEncashmentsListView(HorillaListView):
             """
             onclick="
             $('#applyFilter').closest('form').find('[name=status]').val('requested');
+            $('[name=rejected]').val('unknown').change();
+            $('[name=approved]').val('unknown').change();
             $('#applyFilter').click();
             "
             """,
@@ -152,10 +165,11 @@ class ReimbursementsAndEncashmentsListView(HorillaListView):
 
     columns = [
         (_("Employee"), "employee_id", "employee_id__get_avatar"),
-        (_("Date"), "created_at"),
+        (_("Allowance On"), "allowance_on"),
         (_("Title"), "title"),
         (_("Amount"), "amount"),
         (_("Status"), "get_status_display"),
+        (_("Created On"), "get_created_at_date"),
         (_("Description"), "description"),
         (_("Comment"), "comment_col"),
     ]
@@ -178,7 +192,8 @@ class ReimbursementsAndEncashmentsListView(HorillaListView):
         ("title", _("Title")),
         ("amount", _("Amount")),
         ("status", _("Status")),
-        ("created_at", _("Date")),
+        ("allowance_on", _("Allowance On")),
+        ("created_at", _("Created On")),
         (
             "employee_id__employee_work_info__reporting_manager_id",
             _("Reporting Manager"),
@@ -195,9 +210,10 @@ class ReimbursementsListView(ReimbursementsAndEncashmentsListView):
 
     sortby_mapping = [
         (_("Employee"), "employee_id__get_full_name", "employee_id__get_avatar"),
-        (_("Date"), "created_at"),
+        (_("Allowance On"), "allowance_on"),
         (_("Amount"), "amount"),
         (_("Status"), "get_status_display"),
+        (_("Created On"), "get_created_at_date"),
     ]
 
     row_attrs = """
@@ -221,6 +237,7 @@ class ReimbursementsListView(ReimbursementsAndEncashmentsListView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(is_leave_encashment_enabled(), name="dispatch")
 class LeaveEncashmentsListView(ReimbursementsAndEncashmentsListView):
 
     def __init__(self, **kwargs: Any) -> None:
@@ -229,10 +246,11 @@ class LeaveEncashmentsListView(ReimbursementsAndEncashmentsListView):
 
     sortby_mapping = [
         (_("Employee"), "employee_id__get_full_name", "employee_id__get_avatar"),
-        (_("Date"), "created_at"),
+        (_("Allowance On"), "allowance_on"),
         (_("Amount"), "amount"),
         (_("Available days to encash"), "ad_to_encash"),
         (_("Carryforward to encash"), "cfd_to_encash"),
+        (_("Created On"), "get_created_at_date"),
     ]
 
     columns = [
@@ -271,10 +289,11 @@ class BonusEncashmentsListView(ReimbursementsAndEncashmentsListView):
 
     sortby_mapping = [
         (_("Employee"), "employee_id__get_full_name", "employee_id__get_avatar"),
-        (_("Date"), "created_at"),
+        (_("Allowance On"), "allowance_on"),
         (_("Amount"), "amount"),
         (_("Status"), "get_status_display"),
         (_("Bonus to encash"), "bonus_to_encash"),
+        (_("Created On"), "get_created_at_date"),
     ]
 
     columns = [
@@ -302,27 +321,103 @@ class BonusEncashmentsListView(ReimbursementsAndEncashmentsListView):
         return queryset
 
 
-@method_decorator(login_required, name="dispatch")
-class ReimbursementsNav(HorillaNavView):
+class _ReimbursementTabNavBase(HorillaNavView):
     """
-    Nav bar
+    Shared Search/Filter/Create wiring for each Reimbursements/Encashments
+    tab's own, independent Nav - nav_title/search_url/search_swap_target
+    differ per tab, since each tab's heading should read as that tab's own
+    name, not the page's combined name.
     """
+
+    filter_instance = ReimbursementFilter()
+    filter_form_context_name = "form"
+    filter_body_template = "cbv/reimbursements/filter.html"
+    # Modern slide-over filter panel (generic/horilla_nav.html's own
+    # {% if modern_filter %} branch) -- same treatment as every other
+    # panel this session. ReimbursementFilter.ajax_fields carries the
+    # AJAX-loaded comboboxes this needs.
+    modern_filter = True
+
+    # Set by each subclass so its own Create button always creates a record
+    # of that tab's own type, instead of showing a Type dropdown to pick from.
+    create_type = ""
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self.search_url = reverse("tab-reimbursement")
+        create_url = reverse_lazy("reimbursement-create")
+        if self.create_type:
+            create_url = f"{create_url}?type={self.create_type}"
         self.create_attrs = f"""
-                            hx-get="{reverse_lazy("reimbursement-create")}"
+                            hx-get="{create_url}"
                             hx-target="#genericModalBody"
                             data-target="#genericModal"
                             data-toggle="oh-modal-toggle"
                             """
 
+
+@method_decorator(login_required, name="dispatch")
+class ReimbursementNav(_ReimbursementTabNavBase):
+    """
+    Independent Nav for the Reimbursements tab.
+    """
+
     nav_title = _("Reimbursements")
-    filter_instance = ReimbursementFilter()
-    filter_form_context_name = "form"
-    filter_body_template = "cbv/reimbursements/filter.html"
-    search_swap_target = "#listContainer"
+    create_type = "reimbursement"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.search_url = reverse("list-reimbursement")
+        self.search_swap_target = "#reimbursementListContainer"
+
+
+@method_decorator(login_required, name="dispatch")
+@method_decorator(is_leave_encashment_enabled(), name="dispatch")
+class LeaveEncashNav(_ReimbursementTabNavBase):
+    """
+    Independent Nav for the Leave Encashments tab.
+    """
+
+    nav_title = _("Leave Encashments")
+    create_type = "leave_encashment"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.search_url = reverse("list-leave-encash")
+        self.search_swap_target = "#leaveEncashListContainer"
+
+
+@method_decorator(login_required, name="dispatch")
+class BonusEncashNav(_ReimbursementTabNavBase):
+    """
+    Independent Nav for the Bonus Encashments tab.
+    """
+
+    nav_title = _("Bonus Encashments")
+    create_type = "bonus_encashment"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.search_url = reverse("list-bonus-encash")
+        self.search_swap_target = "#bonusEncashListContainer"
+
+
+class ReimbursementTabShell(HorillaTabContentShell):
+    nav_url_name = "reimbursement-nav"
+    container_id = "reimbursementListContainer"
+    tabs_root_id = "reimbursmentContainer"
+
+
+@method_decorator(is_leave_encashment_enabled(), name="dispatch")
+class LeaveEncashTabShell(HorillaTabContentShell):
+    nav_url_name = "leave-encash-nav"
+    container_id = "leaveEncashListContainer"
+    tabs_root_id = "reimbursmentContainer"
+
+
+class BonusEncashTabShell(HorillaTabContentShell):
+    nav_url_name = "bonus-encash-nav"
+    container_id = "bonusEncashListContainer"
+    tabs_root_id = "reimbursmentContainer"
 
     # Mirrors ReimbursementsAndEncashmentsListView.nested_group_by_fields
     nested_group_by_fields = [
@@ -330,7 +425,8 @@ class ReimbursementsNav(HorillaNavView):
         ("title", _("Title")),
         ("amount", _("Amount")),
         ("status", _("Status")),
-        ("created_at", _("Date")),
+        ("allowance_on", _("Allowance On")),
+        ("created_at", _("Created On")),
         (
             "employee_id__employee_work_info__reporting_manager_id",
             _("Reporting Manager"),
@@ -349,10 +445,11 @@ class ReimbursementsDetailView(HorillaDetailedView):
     """
 
     body = [
-        (_("Date"), "created_at"),
+        (_("Allowance On"), "allowance_on"),
         (_("Amount"), "amount"),
         (_("Status"), "get_status_display"),
         (_("Attachments"), "attachments_col"),
+        (_("Created On"), "get_created_at_date"),
         (_("Description"), "description"),
     ]
     cols = {
@@ -371,6 +468,7 @@ class ReimbursementsDetailView(HorillaDetailedView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(is_leave_encashment_enabled(), name="dispatch")
 class LeaveEncashmentsDetailedView(ReimbursementsDetailView):
 
     position = 3
@@ -399,8 +497,45 @@ class ReimbursementsFormView(HorillaFormView):
 
     model = Reimbursement
     form_class = ReimbursementForm
-    new_display_title = _("Create Reimbursement / Encashment")
     template_name = "cbv/reimbursements/forms.html"
+
+    def dispatch(self, request, *args, **kwargs):
+        # Shared by all 3 tabs (?type=... on create, instance.type on edit)
+        # -- only the leave_encashment path needs gating here. Eligibility
+        # (as opposed to the plain enabled/disabled check) only applies to a
+        # self-service employee creating their own request -- an admin/
+        # manager with add/view_reimbursement can still create one for
+        # anyone regardless of that employee's own eligibility.
+        instance = Reimbursement.objects.filter(pk=kwargs.get("pk")).first()
+        record_type = request.GET.get("type") or (instance.type if instance else None)
+        if record_type == "leave_encashment" and not leave_encashment_visible_to(
+            request
+        ):
+            return handle_no_permission(
+                request, message=_("Sorry, Leave Encashment is not enabled.")
+            )
+        return super().dispatch(request, *args, **kwargs)
+
+    # Maps Reimbursement.type -> the singular, tab-matching label to show
+    # on the form (Reimbursement.get_type_display() exists too, but its
+    # "Bonus Point Encashment" wording doesn't match the Bonus Encashments
+    # tab this form was opened from).
+    type_display_titles = {
+        "reimbursement": _("Reimbursement"),
+        "leave_encashment": _("Leave Encashment"),
+        "bonus_encashment": _("Bonus Encashment"),
+    }
+
+    @property
+    def new_display_title(self):
+        # Each tab's Create button passes ?type=... (see
+        # _ReimbursementTabNavBase) so the title reflects the tab it was
+        # opened from; a generic fallback covers reaching this form any
+        # other way.
+        create_type = self.request.GET.get("type")
+        return self.type_display_titles.get(
+            create_type, _("Reimbursement / Encashment")
+        )
 
     def get_context_data(self, **kwargs):
         """
@@ -408,7 +543,10 @@ class ReimbursementsFormView(HorillaFormView):
         """
         context = super().get_context_data(**kwargs)
         if self.form.instance.pk:
-            self.form_class.verbose_name = _("Update Reimbursement / Encashment")
+            title = self.type_display_titles.get(
+                self.form.instance.type, _("Reimbursement / Encashment")
+            )
+            self.form_class.verbose_name = _("Update %(title)s") % {"title": title}
         return context
 
     def form_valid(self, form: ReimbursementForm) -> HttpResponse:
@@ -417,10 +555,13 @@ class ReimbursementsFormView(HorillaFormView):
         If the form is valid, save the instance and display a success message.
         """
         if form.is_valid():
+            title = self.type_display_titles.get(
+                form.instance.type, _("Reimbursement / Encashment")
+            )
             if form.instance.pk:
-                message = _("Reimbursement updated successfully")
+                message = _("%(title)s updated successfully") % {"title": title}
             else:
-                message = _("Reimbursement created successfully")
+                message = _("%(title)s created successfully") % {"title": title}
             form.save()
             messages.success(self.request, message)
             return self.HttpResponse()

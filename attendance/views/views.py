@@ -14,7 +14,8 @@ provide the main entry points for interacting with the application's functionali
 import logging
 import uuid
 
-from horilla.http.response import HorillaRedirect
+from base.import_template_data import import_template_frame, write_import_xlsx
+from horilla.http.response import HorillaRedirect, with_bulk_result
 from horilla.methods import remove_dynamic_url
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ from django.utils import timezone as django_timezone
 from django.utils.timezone import now
 from django.utils.translation import gettext as __
 from django.utils.translation import gettext_lazy as _
+from django.utils.translation import gettext_noop
 from django.views.decorators.http import require_http_methods
 from PIL import Image
 from xlsxwriter.utility import xl_range
@@ -246,22 +248,10 @@ def attendance_excel(_request):
         HttpResponse: An HTTP response containing an empty Excel template with predefined columns.
     """
     try:
-        columns = [
-            "Badge ID",
-            "Shift",
-            "Work type",
-            "Attendance date",
-            "Check-in date",
-            "Check-in",
-            "Check-out date",
-            "Check-out",
-            "Worked hour",
-            "Minimum hour",
-        ]
-        data_frame = pd.DataFrame(columns=columns)
+        data_frame = import_template_frame("attendance")
         response = HttpResponse(content_type="application/ms-excel")
         response["Content-Disposition"] = 'attachment; filename="my_excel_file.xlsx"'
-        data_frame.to_excel(response, index=False)
+        write_import_xlsx(data_frame, response)
         return response
     except Exception as exception:
         return HttpResponse(exception)
@@ -289,6 +279,31 @@ def attendance_import(request):
         data_frame = (
             pd.read_csv(file) if file_extension == "csv" else pd.read_excel(file)
         )
+        required_columns = [
+            "Badge ID",
+            "Shift",
+            "Work type",
+            "Attendance date",
+            "Check-in date",
+            "Check-in",
+            "Check-out date",
+            "Check-out",
+            "Worked hour",
+            "Minimum hour",
+        ]
+        missing_columns = [c for c in required_columns if c not in data_frame.columns]
+        if missing_columns:
+            message = _(
+                "These required headers are missing in the uploaded file: "
+            ) + ", ".join(missing_columns)
+            response = render(
+                request,
+                "attendance/attendance/import_error_alert.html",
+                {"error_message": message},
+            )
+            response["HX-Retarget"] = "#attendanceImportError"
+            response["HX-Reswap"] = "innerHTML"
+            return response
         attendance_dicts = data_frame.to_dict("records")
         attendance_import = process_attendance_data(attendance_dicts)
         path_info = None
@@ -314,6 +329,11 @@ def attendance_export(request):
         and resolver_match.url_name
         and resolver_match.url_name == "attendance-info-export-form"
     ):
+        # Only the filter form is an htmx fragment. The export itself is a
+        # plain form GET (a file download, e.g. from the employee list's
+        # "Export Individual Data"), so it must not require HX-Request.
+        if "HTTP_HX_REQUEST" not in request.META:
+            return render(request, "405.html", status=405)
         return render(
             request,
             "attendance/attendance/export_filter.html",
@@ -759,6 +779,7 @@ def attendance_overtime_delete(request, obj_id):
             return HorillaRedirect(request)
     elif hx_target:
         return HttpResponse()
+    return HorillaRedirect(request)
 
 
 @login_required
@@ -1074,7 +1095,7 @@ def handle_activity_import_error(error_data):
     # Create an HTTP response with an Excel attachment
     response = HttpResponse(content_type="application/ms-excel")
     response["Content-Disposition"] = 'attachment; filename="ImportError.xlsx"'
-    data_frame.to_excel(response, index=False)
+    write_import_xlsx(data_frame, response)
 
     def get_activity_error_sheet(request):
         remove_dynamic_url(path_info)
@@ -1093,6 +1114,7 @@ def handle_activity_import_error(error_data):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.add_attendanceactivity")
 def attendance_activity_import(request):
     if request.method == "POST":
@@ -1117,24 +1139,15 @@ def attendance_activity_import(request):
 
 @login_required
 @permission_required("attendance.add_attendanceactivity")
+@require_http_methods(["GET"])
 def attendance_activity_import_excel(request):
     if request.method == "GET":
-        data_frame = pd.DataFrame(
-            columns=[
-                "Badge ID",
-                "Employee",
-                "Attendance Date",
-                "In Date",
-                "Check In",
-                "Check Out",
-                "Out Date",
-            ]
-        )
+        data_frame = import_template_frame("attendance_activity")
         response = HttpResponse(
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
         response["Content-Disposition"] = 'attachment; filename="activity_excel.xlsx"'
-        data_frame.to_excel(response, index=False)
+        write_import_xlsx(data_frame, response)
         return response
 
 
@@ -1409,11 +1422,10 @@ def validate_bulk_attendance(request):
             notify.send(
                 request.user.employee_get,
                 recipient=attendance.employee_id.employee_user_id,
-                verb=f"Your attendance for the date {attendance.attendance_date} is validated",
-                verb_ar=f"تم التحقق من حضورك في تاريخ {attendance.attendance_date}",
-                verb_de=f"Ihre Anwesenheit für das Datum {attendance.attendance_date} wurde bestätigt",
-                verb_es=f"Se ha validado su asistencia para la fecha {attendance.attendance_date}",
-                verb_fr=f"Votre présence pour la date {attendance.attendance_date} est validée",
+                verb=gettext_noop(
+                    "Your attendance for the date %(attendance_date)s is validated"
+                ),
+                verb_params={"attendance_date": str(attendance.attendance_date)},
                 redirect=reverse("view-my-attendance") + f"?id={attendance.id}",
                 icon="checkmark",
             )
@@ -1434,7 +1446,13 @@ def validate_bulk_attendance(request):
         else:
             messages.error(request, msg)
 
-    return JsonResponse({"message": "success"})
+    # Everything selected that wasn't validated (missing, own record, pending
+    # update request) counts as failed. The browser shows these counts in a
+    # result dialog instead of the toasts above.
+    failed = max(len(set(map(str, ids))) - validate_req_count, 0)
+    return with_bulk_result(
+        JsonResponse({"message": "success"}), validate_req_count, failed
+    )
 
 
 @login_required
@@ -1478,11 +1496,10 @@ def validate_this_attendance(request, obj_id):
         notify.send(
             request.user.employee_get,
             recipient=attendance.employee_id.employee_user_id,
-            verb=f"Your attendance for the date {attendance.attendance_date} is validated",
-            verb_ar=f"تم تحقيق حضورك في تاريخ {attendance.attendance_date}",
-            verb_de=f"Deine Anwesenheit für das Datum {attendance.attendance_date} ist bestätigt.",
-            verb_es=f"Se valida tu asistencia para la fecha {attendance.attendance_date}.",
-            verb_fr=f"Votre présence pour la date {attendance.attendance_date} est validée.",
+            verb=gettext_noop(
+                "Your attendance for the date %(attendance_date)s is validated"
+            ),
+            verb_params={"attendance_date": str(attendance.attendance_date)},
             redirect=reverse("view-my-attendance") + f"?id={attendance.id}",
             icon="checkmark",
         )
@@ -1514,19 +1531,14 @@ def revalidate_this_attendance(request, obj_id):
         with contextlib.suppress(Exception):
             notify.send(
                 request.user.employee_get,
-                recipient=(
-                    attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id
+                recipient=attendance.employee_id.employee_work_info.reporting_manager_id.employee_user_id,
+                verb=gettext_noop(
+                    "%(employee)s requested revalidation for %(attendance_date)s attendance"
                 ),
-                verb=f"{attendance.employee_id} requested revalidation for \
-                    {attendance.attendance_date} attendance",
-                verb_ar=f"{attendance.employee_id} طلب إعادة\
-                      التحقق من حضور تاريخ {attendance.attendance_date}",
-                verb_de=f"{attendance.employee_id} beantragte eine Neubewertung der \
-                    Teilnahme am {attendance.attendance_date}",
-                verb_es=f"{attendance.employee_id} solicitó la validación nuevamente \
-                    para la asistencia del {attendance.attendance_date}",
-                verb_fr=f"{attendance.employee_id} a demandé une revalidation pour la \
-                    présence du {attendance.attendance_date}",
+                verb_params={
+                    "employee": str(attendance.employee_id),
+                    "attendance_date": str(attendance.attendance_date),
+                },
                 redirect=reverse("view-my-attendance") + f"?id={attendance.id}",
                 icon="refresh",
             )
@@ -1565,16 +1577,10 @@ def approve_overtime(request, obj_id):
             notify.send(
                 request.user.employee_get,
                 recipient=attendance.employee_id.employee_user_id,
-                verb=f"Your {attendance.attendance_date}'s attendance \
-                    overtime approved.",
-                verb_ar=f"تمت الموافقة على إضافة ساعات العمل الإضافية لتاريخ \
-                    {attendance.attendance_date}.",
-                verb_de=f"Die Überstunden für den {attendance.attendance_date}\
-                      wurden genehmigt.",
-                verb_es=f"Se ha aprobado el tiempo extra de asistencia para el \
-                    {attendance.attendance_date}.",
-                verb_fr=f"Les heures supplémentaires pour la date\
-                      {attendance.attendance_date} ont été approuvées.",
+                verb=gettext_noop(
+                    "Your %(attendance_date)s's attendance overtime approved."
+                ),
+                verb_params={"attendance_date": str(attendance.attendance_date)},
                 redirect=reverse("attendance-overtime-view") + f"?id={attendance.id}",
                 icon="checkmark",
             )
@@ -1604,22 +1610,18 @@ def approve_bulk_overtime(request):
     for attendance_id in filtered_ids:
         try:
             attendance = Attendance.objects.get(id=attendance_id)
+            if attendance.attendance_overtime_approve:
+                continue  # already approved: nothing to do, counted as skipped
             attendance.attendance_overtime_approve = True
             attendance.save()
             otapprove_ids.append(attendance)
             notify.send(
                 request.user.employee_get,
                 recipient=attendance.employee_id.employee_user_id,
-                verb=f"Overtime approved for\
-                      {attendance.attendance_date}'s attendance",
-                verb_ar=f"تمت الموافقة على العمل الإضافي لحضور تاريخ \
-                    {attendance.attendance_date}",
-                verb_de=f"Überstunden für die Anwesenheit am \
-                    {attendance.attendance_date} genehmigt",
-                verb_es=f"Horas extra aprobadas para la asistencia del \
-                    {attendance.attendance_date}",
-                verb_fr=f"Heures supplémentaires approuvées pour la présence du \
-                    {attendance.attendance_date}",
+                verb=gettext_noop(
+                    "Overtime approved for %(attendance_date)s's attendance"
+                ),
+                verb_params={"attendance_date": str(attendance.attendance_date)},
                 redirect=reverse("attendance-overtime-view") + f"?id={attendance.id}",
                 icon="checkmark",
             )
@@ -1628,7 +1630,12 @@ def approve_bulk_overtime(request):
     if otapprove_ids:
         messages.success(request, _(" {} Overtime approved".format(len(otapprove_ids))))
 
-    return JsonResponse({"message": "Success"})
+    # Selected but not approved (missing, own record, already approved) = failed.
+    # The browser shows these counts in a result dialog instead of the toasts.
+    failed = max(len(set(map(str, ids))) - len(otapprove_ids), 0)
+    return with_bulk_result(
+        JsonResponse({"message": "Success"}), len(otapprove_ids), failed
+    )
 
 
 @login_required
@@ -1641,7 +1648,10 @@ def attendance_add_to_batch(request):
     batches = BatchAttendance.objects.all()
     ids = request.GET.getlist("ids")
     if request.method == "POST":
-        ids = request.GET["ids"]
+        ids = request.GET.get("ids")
+        if not ids:
+            messages.error(request, _("Something went wrong."))
+            return HorillaRedirect(request)
         # Remove brackets and quotes, then split and convert to integers
         int_ids = [int(x.strip().strip("'")) for x in ids.strip("[]").split(",")]
         batch_id = request.POST.get("batch_attendance_id")
@@ -1762,41 +1772,6 @@ def update_fields_based_shift(request):
             else AttendanceForm(initial=initial_data)
         )
     )
-    return render(
-        request,
-        "attendance/attendance/update_hx_form.html",
-        {"request": request, "form": form},
-    )
-
-
-@login_required
-@hx_request_required
-def update_worked_hour_field(request):
-    """
-    Update the worked hour field based on clock-in and clock-out times.
-
-    This view function calculates the total worked hours for an employee
-    by parsing the clock-in and clock-out dates and times from the request
-    parameters. It computes the duration between the two times and formats
-    the result as a string in the "HH:MM" format. The computed worked hours
-    are then initialized in an AttendanceForm, which is rendered in the
-    specified HTML template.
-    """
-    clock_in = parse_datetime(
-        request.GET.get("attendance_clock_in_date"),
-        request.GET.get("attendance_clock_in"),
-    )
-    clock_out = parse_datetime(
-        request.GET.get("attendance_clock_out_date"),
-        request.GET.get("attendance_clock_out"),
-    )
-
-    total_seconds = (
-        (clock_out - clock_in).total_seconds() if clock_in and clock_out else -1
-    )
-    hours, minutes = divmod(max(total_seconds, 0), 3600)
-    worked_hours_str = f"{int(hours):02}:{int(minutes // 60):02}"
-    form = AttendanceForm(initial={"attendance_worked_hour": worked_hours_str})
     return render(
         request,
         "attendance/attendance/update_hx_form.html",
@@ -2116,7 +2091,6 @@ def latecome_attendance_select_filter(request):
 
 
 @login_required
-@hx_request_required
 @permission_required("attendance.add_gracetime")
 def create_grace_time(request):
     """
@@ -2128,7 +2102,20 @@ def create_grace_time(request):
     Returns:
     GET : return grace time form template
     """
-    is_default = eval_validate(request.GET.get("default"))
+    # This endpoint returns only the modal form fragment; a genuine
+    # top-level browser navigation/reload should land on the real Grace
+    # Time settings page instead of showing the raw, unstyled fragment.
+    # Sec-Fetch-Mode is set by the browser itself for a real navigation
+    # and can't be spoofed by an htmx fetch() call, unlike HX-Request alone.
+    if request.headers.get("Sec-Fetch-Mode") == "navigate":
+        redirect_url = reverse("grace-time-view")
+        query_string = request.GET.urlencode()
+        if query_string:
+            redirect_url = f"{redirect_url}?{query_string}"
+        return redirect(redirect_url)
+    is_default = False
+    if request.GET.get("default"):
+        is_default = eval_validate(request.GET.get("default"))
     form = GraceTimeForm(initial={"is_default": is_default})
     if request.method == "POST":
         form = GraceTimeForm(request.POST)
@@ -2188,7 +2175,9 @@ def update_grace_time(request, grace_id):
     Returns:
     GET : return grace time form template
     """
-    grace_time = GraceTime.objects.get(id=grace_id)
+    grace_time = GraceTime.objects.filter(id=grace_id).first()
+    if not grace_time:
+        return HttpResponse()
     form = GraceTimeForm(instance=grace_time)
     if request.method == "POST":
         form = GraceTimeForm(request.POST, instance=grace_time)
@@ -2370,11 +2359,10 @@ def create_attendancerequest_comment(request, attendance_id):
                         notify.send(
                             request.user.employee_get,
                             recipient=rec,
-                            verb=f"{attendance.employee_id}'s attendance request has received a comment.",
-                            verb_ar=f"تلقت طلب الحضور {attendance.employee_id} تعليقًا.",
-                            verb_de=f"{attendance.employee_id}s Anfrage zur Anwesenheit hat einen Kommentar erhalten.",
-                            verb_es=f"La solicitud de asistencia de {attendance.employee_id} ha recibido un comentario.",
-                            verb_fr=f"La demande de présence de {attendance.employee_id} a reçu un commentaire.",
+                            verb=gettext_noop(
+                                "%(employee)s's attendance request has received a comment."
+                            ),
+                            verb_params={"employee": str(attendance.employee_id)},
                             redirect=reverse("request-attendance-view")
                             + f"?id={attendance.id}",
                             icon="chatbox-ellipses",
@@ -2387,11 +2375,9 @@ def create_attendancerequest_comment(request, attendance_id):
                         notify.send(
                             request.user.employee_get,
                             recipient=rec,
-                            verb="Your attendance request has received a comment.",
-                            verb_ar="تلقى طلب الحضور الخاص بك تعليقًا.",
-                            verb_de="Ihr Antrag auf Anwesenheit hat einen Kommentar erhalten.",
-                            verb_es="Tu solicitud de asistencia ha recibido un comentario.",
-                            verb_fr="Votre demande de présence a reçu un commentaire.",
+                            verb=gettext_noop(
+                                "Your attendance request has received a comment."
+                            ),
                             redirect=reverse("request-attendance-view")
                             + f"?id={attendance.id}",
                             icon="chatbox-ellipses",
@@ -2404,11 +2390,10 @@ def create_attendancerequest_comment(request, attendance_id):
                         notify.send(
                             request.user.employee_get,
                             recipient=rec,
-                            verb=f"{attendance.employee_id}'s attendance request has received a comment.",
-                            verb_ar=f"تلقت طلب الحضور {attendance.employee_id} تعليقًا.",
-                            verb_de=f"{attendance.employee_id}s Anfrage zur Anwesenheit hat einen Kommentar erhalten.",
-                            verb_es=f"La solicitud de asistencia de {attendance.employee_id} ha recibido un comentario.",
-                            verb_fr=f"La demande de présence de {attendance.employee_id} a reçu un commentaire.",
+                            verb=gettext_noop(
+                                "%(employee)s's attendance request has received a comment."
+                            ),
+                            verb_params={"employee": str(attendance.employee_id)},
                             redirect=reverse("request-attendance-view")
                             + f"?id={attendance.id}",
                             icon="chatbox-ellipses",
@@ -2418,11 +2403,9 @@ def create_attendancerequest_comment(request, attendance_id):
                     notify.send(
                         request.user.employee_get,
                         recipient=rec,
-                        verb="Your attendance request has received a comment.",
-                        verb_ar="تلقى طلب الحضور الخاص بك تعليقًا.",
-                        verb_de="Ihr Antrag auf Anwesenheit hat einen Kommentar erhalten.",
-                        verb_es="Tu solicitud de asistencia ha recibido un comentario.",
-                        verb_fr="Votre demande de présence a reçu un commentaire.",
+                        verb=gettext_noop(
+                            "Your attendance request has received a comment."
+                        ),
                         redirect=reverse("request-attendance-view")
                         + f"?id={attendance.id}",
                         icon="chatbox-ellipses",
@@ -2555,6 +2538,22 @@ def work_records(request):
 def work_records_change_month(request):
     previous_data = request.GET.urlencode()
     employee_filter_form = EmployeeFilter(request.GET or None)
+    # This same instance renders employee_filters.html a SECOND time here
+    # (inside work_record_list.html's own Export modal) -- work_record_
+    # view.html (the outer page) already renders it once for the browse
+    # filter panel, and Django's default auto_id ("id_%s") has no
+    # per-request salt, so both ended up emitting the exact same field
+    # ids. Company/Department/etc are AJAX-loaded Select2 comboboxes now
+    # (EmployeeFilter.ajax_fields), and select2 keys its own generated
+    # markup off the underlying element's id -- with two elements sharing
+    # one id, the browse panel's copy silently never finished
+    # initializing (confirmed live: it stayed plain .oh-select-ajax while
+    # the modal's copy became select2-hidden-accessible). auto_id (not
+    # `prefix`) only changes the rendered id= attribute, not the field
+    # `name`, so request.GET binding here and in the separate
+    # work-record-export view (which builds its own fresh, unprefixed
+    # EmployeeFilter(request.GET)) are both untouched.
+    employee_filter_form.form.auto_id = "id_wrexport_%s"
 
     employees = filtersubordinatesemployeemodel(
         request, employee_filter_form.qs, "attendance.view_attendance"
@@ -2688,7 +2687,7 @@ _FILTER_LABELS = {
     "employee_work_info__work_type_id": "Work Type",
     "working_today": "Currently Working",
     "employee_user_id__groups": "Groups",
-    "is_active": "Is Active",
+    "is_active": "Active",
     "employee_user_id__user_permissions": "Permissions",
 }
 
@@ -3043,6 +3042,7 @@ def work_record_export(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.add_attendancegeneralsetting")
 def enable_timerunner(request):
     """
@@ -3187,6 +3187,7 @@ def grace_time_page_view(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.view_attendancevalidationcondition")
 def grace_time_list_tab(request):
     """
@@ -3196,6 +3197,7 @@ def grace_time_list_tab(request):
 
 
 @login_required
+@hx_request_required
 @permission_required("attendance.view_attendancevalidationcondition")
 def grace_time_validation_condition_tab(request):
     """
@@ -3250,7 +3252,9 @@ def validation_condition_update(request, obj_id):
     Args:
         obj_id : validation condition instance id
     """
-    condition = AttendanceValidationCondition.objects.get(id=obj_id)
+    condition = AttendanceValidationCondition.objects.filter(id=obj_id).first()
+    if not condition:
+        return HttpResponse()
     form = AttendanceValidationConditionForm(instance=condition)
     if request.method == "POST":
         form = AttendanceValidationConditionForm(request.POST, instance=condition)

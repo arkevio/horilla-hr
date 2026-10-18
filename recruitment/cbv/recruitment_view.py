@@ -13,6 +13,7 @@ from django.utils.decorators import method_decorator
 from django.utils.translation import gettext_lazy as _
 
 from base.models import IntegrationApps
+from horilla.decorators import hx_request_required
 from horilla_views.cbv_methods import login_required, permission_required
 from horilla_views.generic.cbv.views import (
     HorillaDetailedView,
@@ -127,21 +128,12 @@ class RecruitmentList(HorillaListView):
                 data-toggle="oh-modal-toggle"
                 """
 
-    # Mirrors RecruitmentNav.nested_group_by_fields below -- List and Nav
-    # are separate classes/templates (see employee/cbv/employees.py's
-    # EmployeesList/EmployeeNav for the same split). "Managers"
-    # (recruitment_managers) and the M2M "Open Positions" (open_positions)
-    # are deliberately left out: they're ManyToManyFields, and the nested
-    # engine's `values(*fields).annotate(Count("pk"))` aggregate would fan
-    # out one row per related manager/position, double-counting
-    # recruitments with more than one assigned. `job_position_id` (a
-    # single FK, distinct from the open_positions M2M) is used instead.
     nested_group_by_fields = [
         ("title", _("Recruitment")),
         ("job_position_id", _("Job Position")),
         ("company_id", _("Company")),
-        ("closed", _("Is Closed")),
-        ("is_published", _("Is Published")),
+        ("closed", _("Closed")),
+        ("is_published", _("Published")),
         ("start_date", _("Start Date")),
         ("end_date", _("End Date")),
     ]
@@ -159,6 +151,10 @@ class RecruitmentNav(HorillaNavView):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.search_url = reverse("list-recruitment")
+        self.search_in = [
+            ("job_position_id", _("Job Position")),
+            ("company_id", _("Company")),
+        ]
 
         self.create_attrs = f"""
                             hx-get='{reverse_lazy('recruitment-create')}'
@@ -172,14 +168,14 @@ class RecruitmentNav(HorillaNavView):
     filter_form_context_name = "form"
     search_swap_target = "#listContainer"
     filter_body_template = "cbv/recruitment/filters.html"
+    modern_filter = True
 
-    # Mirrors RecruitmentList.nested_group_by_fields
     nested_group_by_fields = [
         ("title", _("Recruitment")),
         ("job_position_id", _("Job Position")),
         ("company_id", _("Company")),
-        ("closed", _("Is Closed")),
-        ("is_published", _("Is Published")),
+        ("closed", _("Closed")),
+        ("is_published", _("Published")),
         ("start_date", _("Start Date")),
         ("end_date", _("End Date")),
     ]
@@ -304,8 +300,9 @@ class RecruitmentForm(HorillaFormView):
         Process form submission to save or update a Recruitment object and display success message.
         """
         targets_to_reload = []
+        is_create = not form.instance.pk
 
-        if form.instance.pk:
+        if not is_create:
             recruitment = form.save()
             recruitment_managers = self.request.POST.getlist("recruitment_managers")
             if recruitment_managers:
@@ -328,11 +325,15 @@ class RecruitmentForm(HorillaFormView):
             message = _("Recruitment Created Successfully")
         CACHE.delete(f"matching_resumes_{recruitment.pk}")
         messages.success(self.request, message)
-        if self.request.GET.get("pipeline") == "true" or (
+
+        from_pipeline = self.request.GET.get("pipeline") == "true" or (
             self.request.resolver_match
             and self.request.resolver_match.url_name == "recruitment-update-pipeline"
-        ):
-            # Refresh pipeline container only, instead of reloading the whole page.
+        )
+        if from_pipeline and is_create:
+            script = f"window.location.href = '{reverse('cbv-pipeline')}';"
+            return self.HttpResponse(script=script)
+        if from_pipeline:
             targets_to_reload.append("#applyFilter")
 
         return self.HttpResponse(targets_to_reload=targets_to_reload)
@@ -342,6 +343,7 @@ class RecruitmentForm(HorillaFormView):
 
 
 @method_decorator(login_required, name="dispatch")
+@method_decorator(hx_request_required, name="dispatch")
 class AddCandidateFormView(HorillaFormView):
     """
     form view for add candidate
@@ -350,6 +352,19 @@ class AddCandidateFormView(HorillaFormView):
     form_class = AddCandidateForm
     model = Candidate
     new_display_title = _("Add Candidate")
+
+    def dispatch(self, request, *args, **kwargs):
+        """
+        Return an empty response for a GET request without a stage or
+        recruitment.
+        """
+        if (
+            request.method == "GET"
+            and not request.GET.get("stage_id")
+            and not request.GET.get("rec_id")
+        ):
+            return HttpResponse()
+        return super().dispatch(request, *args, **kwargs)
 
     def get_initial(self) -> dict:
         initial = super().get_initial()

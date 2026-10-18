@@ -14,11 +14,30 @@ from attendance.cbv.hour_account import HourAccountList
 from attendance.cbv.my_attendances import MyAttendancesListView
 from attendance.filters import AttendanceFilters
 from attendance.models import Attendance
+from base.cbv.work_shift_tab import ProfileTabShellView
 from base.methods import filtersubordinates
 from base.request_and_approve import paginator_qry
 from employee.models import Employee
 from horilla_views.cbv_methods import login_required
-from horilla_views.generic.cbv.views import HorillaListView, HorillaTabView
+from horilla_views.generic.cbv.views import (
+    HorillaListView,
+    HorillaNavView,
+    HorillaTabView,
+)
+
+
+def _badge_count_from_individual_tab(request, pk, view_cls):
+    """
+    Same idea as attendance/cbv/attendances.py's
+    _badge_count_from_attendance_list_view, but for a profile tab's list
+    view, which is scoped to one employee (pk) instead of the whole page.
+    """
+    view = view_cls()
+    view.request = request
+    view.args = ()
+    view.kwargs = {"pk": pk}
+    view.queryset = None
+    return view.get_queryset().count()
 
 
 @method_decorator(login_required, name="dispatch")
@@ -39,30 +58,33 @@ class AttendanceTabView(HorillaTabView):
         context["emp_id"] = pk
         employee = Employee.objects.get(id=pk)
         context["instance"] = employee
+
+        # Imported here, not at module level: attendances.py imports
+        # AttendanceTabView from this module, so importing it back at the
+        # top of this file would be a circular import.
+        from attendance.cbv.attendances import ValidateAttendancesIndividualTabView
+
         context["tabs"] = [
             {
                 "title": _("Requested Attendances"),
-                "url": f"{reverse('attendance-request-individual-tab',kwargs={'pk': pk})}",
-                "actions": [
-                    {
-                        "action": _("Create Attendance Request"),
-                        "accessibility": "attendance.cbv.accessibility.create_attendance_request_accessibility",
-                        "attrs": f"""
-                                hx-get="{reverse('request-new-attendance')}?emp_id={pk}",
-								hx-target="#genericModalBody"
-								data-toggle="oh-modal-toggle"
-								data-target="#genericModal"
-                      """,
-                    }
-                ],
+                "url": f"{reverse('attendance-request-individual-tab-shell',kwargs={'pk': pk})}",
+                "badge": _badge_count_from_individual_tab(
+                    self.request, pk, RequestedAttendanceIndividualView
+                ),
             },
             {
                 "title": _("Validate Attendances"),
                 "url": f"{reverse('validate-attendance-individual-tab',kwargs={'pk': pk})}",
+                "badge": _badge_count_from_individual_tab(
+                    self.request, pk, ValidateAttendancesIndividualTabView
+                ),
             },
             {
                 "title": _("All Attendances"),
                 "url": f"{reverse('all-attendances-individual-tab',kwargs={'pk': pk})}",
+                "badge": _badge_count_from_individual_tab(
+                    self.request, pk, AllAttendancesList
+                ),
             },
         ]
         return context
@@ -73,6 +95,9 @@ class RequestedAttendanceIndividualView(AttendanceRequestListTab):
     """
     list view for requested attendance tab view
     """
+
+    show_saved_filters = False
+    row_status_indications = []
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -89,6 +114,45 @@ class RequestedAttendanceIndividualView(AttendanceRequestListTab):
             employee_id=pk,
         )
         return queryset
+
+
+class RequestedAttendanceIndividualTabShell(ProfileTabShellView):
+    """
+    Shell for the Requested Attendances profile tab.
+    """
+
+    shell_target_id = "attendance-requests-shell"
+    nav_url_name = "attendance-request-individual-tab-nav"
+
+
+@method_decorator(login_required, name="dispatch")
+class RequestedAttendanceIndividualNav(HorillaNavView):
+    """
+    Minimal nav (Create button only) for the Requested Attendances profile
+    tab - "Create Attendance Request" is self-service only, matching the
+    original create_attendance_request_accessibility check (only the
+    employee whose profile this is can raise a request from here).
+    """
+
+    template_name = "generic/inline_nav.html"
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        pk = self.request.resolver_match.kwargs.get("pk")
+        self.search_url = reverse(
+            "attendance-request-individual-tab", kwargs={"pk": pk}
+        )
+        self.search_swap_target = "#attendance-requests-shell"
+        employee = Employee.objects.filter(pk=pk).first()
+        if employee and self.request.user == employee.employee_user_id:
+            self.create_attrs = f"""
+                hx-get="{reverse('request-new-attendance')}?emp_id={pk}"
+                hx-target="#genericModalBody"
+                data-toggle="oh-modal-toggle"
+                data-target="#genericModal"
+            """
+
+    nav_title = _("Requested Attendances")
 
 
 @method_decorator(login_required, name="dispatch")
@@ -116,6 +180,8 @@ class HourAccountIndividualTabView(HourAccountList):
 
 @method_decorator(login_required, name="dispatch")
 class AllAttendancesList(MyAttendancesListView):
+
+    show_saved_filters = False
 
     def get_context_data(self, **kwargs: Any):
         context = super().get_context_data(**kwargs)
