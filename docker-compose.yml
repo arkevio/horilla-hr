@@ -58,17 +58,6 @@ services:
       timeout: 5s
       retries: 5
 
-  nginx:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.nginx
-    ports:
-      - "80:80"
-    volumes:
-      - staticfiles:/static:ro
-    depends_on:
-      web:
-        condition: service_healthy
 
 volumes:
   staticfiles:
